@@ -37,6 +37,7 @@
 #include "gdal.h"
 #include "gdal_alg.h"
 
+#include "mapows.h"
 #include "mapthread.h"
 #include "mapraster.h"
 #include "cpl_string.h"
@@ -111,6 +112,21 @@ static void msContourLayerInfoInitialize(layerObj *layer)
   clinfo->ogrLayer.connection = (char*)msSmallMalloc(strlen(clinfo->ogrLayer.name)+13);
   sprintf(clinfo->ogrLayer.connection, "__%s_CONTOUR__", clinfo->ogrLayer.name);
   clinfo->ogrLayer.units = layer->units;
+
+  if (msOWSLookupMetadata(&(layer->metadata), "OFG", "ID_type") == NULL) {
+    msInsertHashTable(&(layer->metadata), "gml_ID_type", "Integer");
+  }
+  {
+    const char* elevItem = CSLFetchNameValue(layer->processing,"CONTOUR_ITEM");
+    if (elevItem && strlen(elevItem) > 0) {
+       char szTmp[100];
+       snprintf(szTmp, sizeof(szTmp), "%s_type", elevItem);
+       if (msOWSLookupMetadata(&(layer->metadata), "OFG", szTmp) == NULL) {
+         snprintf(szTmp, sizeof(szTmp), "gml_%s_type", elevItem);
+         msInsertHashTable(&(layer->metadata), szTmp, "Real");
+       }
+    }
+  }
 }
 
 static void msContourLayerInfoFree(layerObj *layer)
@@ -232,8 +248,11 @@ static int msContourLayerReadRaster(layerObj *layer, rectObj rect)
     InvGeoTransform(adfGeoTransform, adfInvGeoTransform);
 
     mapRect = rect;
-    map_cellsize_x = map_cellsize_y = map->cellsize;      
-
+    if( map->cellsize == 0 )
+    {
+        map->cellsize = msAdjustExtent(&mapRect,map->width,map->height);
+    }
+    map_cellsize_x = map_cellsize_y = map->cellsize;
     /* if necessary, project the searchrect to source coords */
     if (msProjectionsDiffer( &(map->projection), &(layer->projection)))  {
       if ( msProjectRect(&map->projection, &layer->projection, &mapRect)
@@ -427,6 +446,17 @@ static int msContourLayerReadRaster(layerObj *layer, rectObj rect)
     return MS_FAILURE;
   }
 
+  {
+      // Copy nodata value from source dataset to memory dataset
+      int bHasNoData = FALSE;
+      double dfNoDataValue = GDALGetRasterNoDataValue(hBand, &bHasNoData);
+      if( bHasNoData )
+      {
+          GDALSetRasterNoDataValue(GDALGetRasterBand(clinfo->hDS, 1),
+                                   dfNoDataValue);
+      }
+  }
+
   adfGeoTransform[0] = copyRect.minx;
   adfGeoTransform[1] = dst_cellsize_x;
   adfGeoTransform[2] = 0;
@@ -514,6 +544,8 @@ static int msContourLayerGenerateContour(layerObj *layer)
   int levelCount = 0;
   GDALRasterBandH hBand = NULL;
   CPLErr eErr;
+  int bHasNoData = FALSE;
+  double dfNoDataValue;
 
   contourLayerInfo *clinfo = (contourLayerInfo *) layer->layerinfo;
 
@@ -594,10 +626,12 @@ static int msContourLayerGenerateContour(layerObj *layer)
     CSLDestroy(levelsTmp);
     free(option);
   }
-    
+
+  dfNoDataValue = GDALGetRasterNoDataValue(hBand, &bHasNoData);
+
   eErr = GDALContourGenerate( hBand, interval, 0.0,
                               levelCount, levels,
-                              FALSE, 0.0, hLayer,
+                              bHasNoData, dfNoDataValue, hLayer,
                               OGR_FD_GetFieldIndex(OGR_L_GetLayerDefn( hLayer),
                                                     "ID" ),
                               (elevItem == NULL) ? -1 :
@@ -774,6 +808,7 @@ int msContourLayerClose(layerObj *layer)
 
 int msContourLayerGetItems(layerObj *layer)
 {
+  const char* elevItem;
   contourLayerInfo *clinfo = (contourLayerInfo *) layer->layerinfo;
 
   if (clinfo == NULL) {
@@ -782,7 +817,16 @@ int msContourLayerGetItems(layerObj *layer)
     return MS_FAILURE;
   }
 
-  return msContourLayerGetItems(&clinfo->ogrLayer);
+  layer->numitems = 0;
+  layer->items = (char **) msSmallCalloc(sizeof(char *),2);
+
+  layer->items[layer->numitems++] = msStrdup("ID");
+  elevItem = CSLFetchNameValue(layer->processing,"CONTOUR_ITEM");
+  if (elevItem && strlen(elevItem) > 0) {
+    layer->items[layer->numitems++] = msStrdup(elevItem);
+  }
+
+  return msLayerGetItems(&clinfo->ogrLayer);
 }
 
 int msContourLayerWhichShapes(layerObj *layer, rectObj rect, int isQuery)
@@ -800,8 +844,13 @@ int msContourLayerWhichShapes(layerObj *layer, rectObj rect, int isQuery)
     return MS_FAILURE;
   }
 
-  newRect = rect;
-
+  if( isQuery )
+  {
+    newRect = layer->map->extent;
+  }
+  else
+  {
+    newRect = rect;
     /* if necessary, project the searchrect to source coords */
     if (msProjectionsDiffer( &(layer->map->projection), &(layer->projection)))  {
       if (msProjectRect(&layer->projection, &layer->map->projection, &newRect)
@@ -810,6 +859,7 @@ int msContourLayerWhichShapes(layerObj *layer, rectObj rect, int isQuery)
         return MS_FAILURE;
       }
     }
+  }
 
   /* regenerate the raster io */
   if (clinfo->hOGRDS)

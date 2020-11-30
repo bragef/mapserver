@@ -134,8 +134,10 @@ static int bindColorAttribute(colorObj *attribute, const char *value)
 
 static void bindStyle(layerObj *layer, shapeObj *shape, styleObj *style, int drawmode)
 {
+  int applyOpacity = MS_FALSE;
   assert(MS_DRAW_FEATURES(drawmode));
   if(style->numbindings > 0) {
+    applyOpacity = MS_TRUE;
     if(style->bindings[MS_STYLE_BINDING_SYMBOL].index != -1) {
       style->symbol = msGetSymbolIndex(&(layer->map->symbolset), shape->values[style->bindings[MS_STYLE_BINDING_SYMBOL].index], MS_TRUE);
       if(style->symbol == -1) style->symbol = 0; /* a reasonable default (perhaps should throw an error?) */
@@ -187,6 +189,7 @@ static void bindStyle(layerObj *layer, shapeObj *shape, styleObj *style, int dra
   }
   if (style->nexprbindings > 0)
   {
+    applyOpacity = MS_TRUE;
     if (style->exprBindings[MS_STYLE_BINDING_OFFSET_X].type == MS_EXPRESSION)
     {
       style->offsetx = msEvalDoubleExpression(
@@ -238,7 +241,8 @@ static void bindStyle(layerObj *layer, shapeObj *shape, styleObj *style, int dra
       msFree(txt);
     }
   }
-  if(style->opacity < 100 || style->color.alpha != 255 ) {
+
+  if(applyOpacity == MS_TRUE && (style->opacity < 100 || style->color.alpha != 255) ) {
     int alpha;
     alpha = MS_NINT(style->opacity*2.55);
     style->color.alpha = alpha;
@@ -298,6 +302,34 @@ static void bindLabel(layerObj *layer, shapeObj *shape, labelObj *label, int dra
     if(label->bindings[MS_LABEL_BINDING_SHADOWSIZEY].index != -1) {
       label->shadowsizey = 1;
       bindIntegerAttribute(&label->shadowsizey, shape->values[label->bindings[MS_LABEL_BINDING_SHADOWSIZEY].index]);
+    }
+
+    if(label->bindings[MS_LABEL_BINDING_OFFSET_X].index != -1) {
+      label->offsetx = 0;
+      bindIntegerAttribute(&label->offsetx, shape->values[label->bindings[MS_LABEL_BINDING_OFFSET_X].index]);
+    }
+
+    if(label->bindings[MS_LABEL_BINDING_OFFSET_Y].index != -1) {
+      label->offsety = 0;
+      bindIntegerAttribute(&label->offsety, shape->values[label->bindings[MS_LABEL_BINDING_OFFSET_Y].index]);
+    }
+
+    if(label->bindings[MS_LABEL_BINDING_ALIGN].index != -1) {
+      int tmpAlign = 0;
+      bindIntegerAttribute(&tmpAlign, shape->values[label->bindings[MS_LABEL_BINDING_ALIGN].index]);
+      if(tmpAlign != 0) { /* is this test sufficient? */
+        label->align = tmpAlign;
+      } else { /* Integer binding failed, look for strings like cc, ul, lr, etc... */
+        if(strlen(shape->values[label->bindings[MS_LABEL_BINDING_ALIGN].index]) >= 4) {
+          char *va = shape->values[label->bindings[MS_LABEL_BINDING_ALIGN].index];
+          if(!strncasecmp(va,"center",5))
+            label->align = MS_ALIGN_CENTER;
+          else if(!strncasecmp(va,"left",4))
+            label->align = MS_ALIGN_LEFT;
+          else if(!strncasecmp(va,"right",5))
+            label->align = MS_ALIGN_RIGHT;
+        }
+      }
     }
 
     if(label->bindings[MS_LABEL_BINDING_POSITION].index != -1) {
@@ -658,13 +690,22 @@ int *msAllocateValidClassGroups(layerObj *lp, int *nclasses)
 
 int msShapeGetClass(layerObj *layer, mapObj *map, shapeObj *shape, int *classgroup, int numclasses)
 {
+  return msShapeGetNextClass(-1, layer, map, shape, classgroup, numclasses);
+}
+
+int msShapeGetNextClass(int currentclass, layerObj *layer, mapObj *map,
+    shapeObj *shape, int *classgroup, int numclasses)
+{
   int i, iclass;
+
+  if (currentclass < 0)
+    currentclass = -1;
 
   if (layer->numclasses > 0) {
     if (classgroup == NULL || numclasses <=0)
       numclasses = layer->numclasses;
 
-    for(i=0; i<numclasses; i++) {
+    for(i=currentclass+1; i<numclasses; i++) {
       if (classgroup)
         iclass = classgroup[i];
       else
@@ -689,7 +730,18 @@ int msShapeGetClass(layerObj *layer, mapObj *map, shapeObj *shape, int *classgro
       }
 
       if(layer->class[iclass]->status != MS_DELETE && msEvalExpression(layer, shape, &(layer->class[iclass]->expression), layer->classitemindex) == MS_TRUE)
-        return(iclass);
+      {
+        if (layer->class[iclass]->isfallback && currentclass != -1)
+        {
+          // Class is not applicable if it is flagged as fallback (<ElseFilter/> tag in SLD)
+          // but other classes have been applied before.
+          return -1;
+        }
+        else
+        {
+          return(iclass);
+        }
+      }
     }
   }
 
@@ -931,7 +983,7 @@ int msSaveImage(mapObj *map, imageObj *img, const char *filename)
 {
   int nReturnVal = MS_FAILURE;
   char szPath[MS_MAXPATHLEN];
-  struct mstimeval starttime, endtime;
+  struct mstimeval starttime={0}, endtime={0};
 
   if(map && map->debug >= MS_DEBUGLEVEL_TUNING) {
     msGettimeofday(&starttime, NULL);
@@ -1876,7 +1928,7 @@ shapeObj *msOffsetCurve(shapeObj *p, double offset)
     ret->line[i].point=(pointObj*)msSmallMalloc(sizeof(pointObj)*ret->line[i].numpoints);
   }
   for (i = 0; i < p->numlines; i++) {
-    pointObj old_pt, old_diffdir, old_offdir;
+    pointObj old_pt = {0}, old_diffdir, old_offdir;
     if(p->line[i].numpoints<2) {
       ret->line[i].numpoints = 0;
       continue; /* skip degenerate points */
@@ -2240,10 +2292,10 @@ void msRGBtoHSL(colorObj *rgb, double *h, double *s, double *l) {
   double r = rgb->red/255.0, g = rgb->green/255.0, b = rgb->blue/255.0;
   double maxv = MS_MAX(MS_MAX(r, g), b), minv = MS_MIN(MS_MIN(r, g), b);
   double d = maxv - minv;
-  
+
   *h = 0, *s = 0;
   *l = (maxv + minv) / 2;
-  
+
   if (maxv != minv)
   {
     *s = *l > 0.5 ? d / (2 - maxv - minv) : d / (maxv + minv);
@@ -2265,11 +2317,11 @@ static double hue_to_rgb(double p, double q, double t) {
 
 void msHSLtoRGB(double h, double s, double l, colorObj *rgb) {
   double r, g, b;
-  
+
   if(s == 0){
     r = g = b = l;
   } else {
-    
+
     double q = l < 0.5 ? l * (1 + s) : l + s - l * s;
     double p = 2 * l - q;
     r = hue_to_rgb(p, q, h + 0.33333333333333333);
@@ -2284,7 +2336,7 @@ void msHSLtoRGB(double h, double s, double l, colorObj *rgb) {
 /*
  RFC 24: check if the parent pointer is NULL and raise an error otherwise
 */
-int msCheckParentPointer(void* p, char *objname)
+int msCheckParentPointer(void* p, const char *objname)
 {
   char* msg=NULL;
   if (p == NULL) {
@@ -2506,7 +2558,7 @@ char *msBuildOnlineResource(mapObj *map, cgiRequestObj *req)
   port = getenv("HTTP_X_FORWARDED_PORT");
   if(!port)
     port = getenv("SERVER_PORT");
-  
+
   script = getenv("SCRIPT_NAME");
 
   /* HTTPS is set by Apache to "on" in an HTTPS server ... if not set */
@@ -2682,57 +2734,55 @@ void msMapSetLanguageSpecificConnection(mapObj* map, const char* validated_langu
    Ref: http://trac.osgeo.org/gdal/ticket/966 */
 shapeObj* msGeneralize(shapeObj *shape, double tolerance)
 {
-  shapeObj *newShape;
   lineObj newLine = {0,NULL};
-  double sqTolerance = tolerance*tolerance;
-  
-  double dX0, dY0, dX1, dY1, dX, dY, dSqDist;
-  int i;
+  const double sqTolerance = tolerance*tolerance;
 
-  newShape = (shapeObj*)msSmallMalloc(sizeof(shapeObj));
+  shapeObj* newShape = (shapeObj*)msSmallMalloc(sizeof(shapeObj));
   msInitShape(newShape);
   msCopyShape(shape, newShape);
 
   if (shape->numlines<1)
     return newShape;
-  
+
   /* Clean shape */
-  for (i=0; i < newShape->numlines; i++)
+  for (int i=0; i < newShape->numlines; i++)
     free(newShape->line[i].point);
   newShape->numlines = 0;
   if (newShape->line) free(newShape->line);
-    
+
   msAddLine(newShape, &newLine);
-  
-  if (shape->line[0].numpoints>0) {
-    msAddPointToLine(&newShape->line[0],
-                     &shape->line[0].point[0]);              
-    dX0 = shape->line[0].point[0].x;
-    dY0 = shape->line[0].point[0].y;    
+
+  if (shape->line[0].numpoints==0) {
+    return newShape;
   }
-  
-  for(i=1; i<shape->line[0].numpoints; i++)
+
+  msAddPointToLine(&newShape->line[0],
+                   &shape->line[0].point[0]);
+  double dX0 = shape->line[0].point[0].x;
+  double dY0 = shape->line[0].point[0].y;
+
+  for(int i=1; i<shape->line[0].numpoints; i++)
   {
-      dX1 = shape->line[0].point[i].x;
-      dY1 = shape->line[0].point[i].y;
-     
-      dX = dX1-dX0;
-      dY = dY1-dY0;
-      dSqDist = dX*dX + dY*dY;
+      double dX1 = shape->line[0].point[i].x;
+      double dY1 = shape->line[0].point[i].y;
+
+      const double dX = dX1-dX0;
+      const double dY = dY1-dY0;
+      const double dSqDist = dX*dX + dY*dY;
       if (i == shape->line[0].numpoints-1 || dSqDist >= sqTolerance)
       {
           pointObj p;
           p.x = dX1;
           p.y = dY1;
-          
+
           /* Keep this point (always keep the last point) */
           msAddPointToLine(&newShape->line[0],
-                           &p);          
+                           &p);
           dX0 = dX1;
           dY0 = dY1;
         }
     }
-   
+
   return newShape;
 }
 

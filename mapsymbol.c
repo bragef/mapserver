@@ -48,10 +48,6 @@ extern FILE *msyyin;
 
 extern int msyystate;
 
-static const unsigned char PNGsig[8] = {137, 80, 78, 71, 13, 10, 26, 10}; /* 89 50 4E 47 0D 0A 1A 0A hex */
-static const unsigned char JPEGsig[3] = {255, 216, 255}; /* FF D8 FF hex */
-
-
 void freeImageCache(struct imageCacheObj *ic)
 {
   if(ic) {
@@ -403,7 +399,7 @@ int msAddImageSymbol(symbolSetObj *symbolset, char *filename)
           unlink(tmpfullfilename); 
           msFree(tmpfilename);
           msFree(tmppath);
-          return MS_FAILURE;
+          return -1;
         }
       }
       msFree(tmpfilename);
@@ -558,6 +554,7 @@ int loadSymbolSet(symbolSetObj *symbolset, mapObj *map)
   char szPath[MS_MAXPATHLEN], *pszSymbolPath=NULL;
 
   int foundSymbolSetToken=MS_FALSE;
+  int symbolSetLevel=0;
   int token;
 
   if(!symbolset) {
@@ -598,12 +595,20 @@ int loadSymbolSet(symbolSetObj *symbolset, mapObj *map)
 
     switch(token) {
       case(END):
+        if (--symbolSetLevel < 0) {
+          msSetError(MS_IDENTERR, "END token found outside SYMBOLSET context. When nesting multiple SYMBOLSETs, make sure the SYMBOLSET/END pairs match.", "msLoadSymbolSet()");
+          status = -1;
+        }
+        break;
       case(EOF):
         status = 0;
         break;
       case(SYMBOL):
         /* Allocate/init memory for new symbol if needed */
-        if (msGrowSymbolSet(symbolset) == NULL) {
+        if (symbolSetLevel == 0) {
+          msSetError(MS_IDENTERR, "SYMBOL token found outside SYMBOLSET context. When nesting multiple SYMBOLSETs, make sure the SYMBOLSET/END pairs match.", "msLoadSymbolSet()");
+          status = -1;
+        } else if (msGrowSymbolSet(symbolset) == NULL) {
           status = -1;
         } else if((loadSymbol((symbolset->symbol[symbolset->numsymbols]), pszSymbolPath) == -1))
           status = -1;
@@ -612,6 +617,7 @@ int loadSymbolSet(symbolSetObj *symbolset, mapObj *map)
         break;
       case(SYMBOLSET):
         foundSymbolSetToken = MS_TRUE;
+        symbolSetLevel++;
         break;
       default:
         msSetError(MS_IDENTERR, "Parsing error near (%s):(line %d)", "loadSymbolSet()", msyystring_buffer, msyylineno);

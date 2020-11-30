@@ -6,11 +6,17 @@ require 'socket'
 # Vagrantfile API/syntax version. Don't touch unless you know what you're doing!
 VAGRANTFILE_API_VERSION = "2"
 
+$set_environment_variables = <<SCRIPT
+tee "/etc/profile.d/myvars.sh" > "/dev/null" <<EOF
+export BUILDPATH=/vagrant/build_vagrant
+EOF
+SCRIPT
+
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   vm_ram = ENV['VAGRANT_VM_RAM'] || 2048
   vm_cpu = ENV['VAGRANT_VM_CPU'] || 2
 
-  config.vm.box = "ubuntu/trusty64"
+  config.vm.box = "ubuntu/bionic64"
 
   config.vm.hostname = "mapserver-vagrant"
 
@@ -34,7 +40,10 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.provision "shell", path: "scripts/vagrant/virtualbox-fix.sh"
   config.vm.provision "shell", path: "scripts/vagrant/packages.sh"
   config.vm.provision "shell", path: "scripts/vagrant/postgis.sh"
-  config.vm.provision "shell", path: "scripts/vagrant/proj6.sh"
   config.vm.provision "shell", path: "scripts/vagrant/mapserver.sh"
 
+  config.vm.provision "shell", inline: $set_environment_variables, run: "always"
+
 end
+
+

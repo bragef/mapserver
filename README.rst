@@ -1,7 +1,7 @@
 MapServer
 =========
 
-| |Build Status| |Appveyor Build Status|
+| |Build Status| |Appveyor Build Status| |Coveralls Status|
 
 -------
 Summary
@@ -17,7 +17,7 @@ applications can be enhanced using Java, JavaScript or many other web
 technologies. For more  information and complete documentation please 
 visit:
 
-  http://www.mapserver.org/
+  https://mapserver.org/
 
 Bug reports and enhancement submissions can be reported in the MapServer 
 issue tracker at the following url.   If you do make changes and/or enhancements, 
@@ -28,7 +28,7 @@ please let us know so that they might be incorporated into future releases.
 
 Join the MapServer user mailing list online at:
 
-  http://www.mapserver.org/community/lists.html
+  https://mapserver.org/community/lists.html
 
  
 
@@ -69,7 +69,7 @@ License
 
 ::
 
-  Copyright (c) 2008-2019 Open Source Geospatial Foundation.
+  Copyright (c) 2008-2020 Open Source Geospatial Foundation.
   Copyright (c) 1996-2008 Regents of the University of Minnesota.
 
   Permission is hereby granted, free of charge, to any person obtaining a copy 
@@ -96,3 +96,6 @@ License
 
 .. |Appveyor Build Status| image:: https://ci.appveyor.com/api/projects/status/vw1n07095a8bg23u?svg=true
    :target: https://ci.appveyor.com/project/mapserver/mapserver
+
+.. |Coveralls Status| image:: https://coveralls.io/repos/github/mapserver/mapserver/badge.svg?branch=master
+   :target: https://coveralls.io/github/mapserver/mapserver?branch=master

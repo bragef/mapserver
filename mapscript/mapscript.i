@@ -33,6 +33,8 @@
 %begin %{
 #ifdef _MSC_VER
 #define SWIG_PYTHON_INTERPRETER_NO_DEBUG
+#else
+#define _GNU_SOURCE 1
 #endif
 %}
 
@@ -252,9 +254,12 @@ typedef struct {
 %include "../../mapserver.h"
 %include "../../mapserver-version.h"
 %include "../../mapprimitive.h"
+%include "../../maperror.h"
 %include "../../mapshape.h"
 %include "../../mapproject.h"
 %include "../../mapsymbol.h"
+%include "../../maphash.h"
+%include "../../maperror.h"
 
 %apply Pointer NONNULL { mapObj *map };
 %apply Pointer NONNULL { layerObj *layer };

@@ -16,7 +16,7 @@ include(CheckCSourceCompiles)
 
 
 set (MapServer_VERSION_MAJOR 7)
-set (MapServer_VERSION_MINOR 5)
+set (MapServer_VERSION_MINOR 7)
 set (MapServer_VERSION_REVISION 0)
 set (MapServer_VERSION_SUFFIX "")
 
@@ -51,9 +51,6 @@ endif(MapServer_IS_DEV_VERSION)
 MATH(EXPR MapServer_VERSION_NUM "${MapServer_VERSION_MAJOR}*10000+${MapServer_VERSION_MINOR}*100+${MapServer_VERSION_REVISION}")
 
 SET(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
-
-# Add custom function to check Python modules are installed
-include(FindPythonModule)
 
 if (APPLE)
   set(CMAKE_FIND_FRAMEWORK "LAST")
@@ -139,8 +136,8 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 #options suported by the cmake builder
 option(WITH_PROTOBUFC "Choose if protocol buffers support should be built in (required for vector tiles)" ON)
 option(WITH_KML "Enable native KML output support (requires libxml2 support)" OFF)
-option(WITH_SOS "Enable SOS Server support (requires PROJ and libxml2 support)" OFF)
-option(WITH_WMS "Enable WMS Server support (requires proj support)" ON)
+option(WITH_SOS "Enable SOS Server support (requires libxml2 support)" OFF)
+option(WITH_WMS "Enable WMS Server support" ON)
 option(WITH_FRIBIDI "Choose if FriBidi glyph shaping support should be built in (usefull for right-to-left languages) (requires HARFBUZZ)" ON)
 option(WITH_HARFBUZZ "Choose if Harfbuzz complex text layout should be included (needed for e.g. arabic and hindi) (requires FRIBIDI)" ON)
 option(WITH_ICONV "Choose if Iconv Internationalization support should be built in" ON)
@@ -151,11 +148,11 @@ option(WITH_MYSQL "Choose if MYSQL joining support should be built in" OFF)
 option(WITH_FCGI "Choose if FastCGI support should be built in" ON)
 option(WITH_GEOS "Choose if GEOS geometry operations support should be built in" ON)
 option(WITH_POSTGIS "Choose if Postgis input support should be built in" ON)
-option(WITH_CLIENT_WMS "Enable Client WMS Layer support (requires CURL and GDAL support)" OFF)
-option(WITH_CLIENT_WFS "Enable Client WMS Layer support (requires CURL and OGR support)" OFF)
+option(WITH_CLIENT_WMS "Enable Client WMS Layer support (requires CURL)" OFF)
+option(WITH_CLIENT_WFS "Enable Client WMS Layer support (requires CURL)" OFF)
 option(WITH_CURL "Enable Curl HTTP support (required for wms/wfs client, and remote SLD)" OFF)
-option(WITH_WFS "Enable WFS Server support (requires PROJ and OGR support)" ON)
-option(WITH_WCS "Enable WCS Server support (requires PROJ and GDAL support)" ON)
+option(WITH_WFS "Enable WFS Server support" ON)
+option(WITH_WCS "Enable WCS Server support" ON)
 option(WITH_LIBXML2 "Choose if libxml2 support should be built in (used for sos, wcs 1.1,2.0 and wfs 1.1)" ON)
 option(WITH_THREAD_SAFETY "Choose if a thread-safe version of libmapserver should be built (only recommended for some mapscripts)" OFF)
 option(WITH_GIF "Enable GIF support (for PIXMAP loading)" ON)
@@ -166,7 +163,7 @@ option(WITH_PERL "Enable Perl mapscript support" OFF)
 option(WITH_RUBY "Enable Ruby mapscript support" OFF)
 option(WITH_JAVA "Enable Java mapscript support" OFF)
 option(WITH_CSHARP "Enable C# mapscript support" OFF)
-option(WITH_POINT_Z_M "include Z and M coordinates in point structure (advanced, not recommended)" OFF)
+option(WITH_POINT_Z_M "include Z and M coordinates in point structure" ON)
 option(WITH_ORACLESPATIAL "include oracle spatial database input support" OFF)
 option(WITH_ORACLE_PLUGIN "include oracle spatial database input support as plugin" OFF)
 option(WITH_MSSQL2008 "include mssql 2008 database input support as plugin" OFF)
@@ -185,7 +182,7 @@ option(WITH_GENERIC_NINT "generic rounding" OFF)
 # PERLV_ld_DETECT?
 
 # Add compiler flags for warnings
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_COMPILER_IS_GNUCC)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_COMPILER_IS_GNUCC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror=format-security")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror=format-security")
 endif()
@@ -261,29 +258,31 @@ if(WIN32)
   set(REGEX_MALLOC 1)
   set(USE_GENERIC_MS_NINT 1)
   set(HAVE_STRING_H 0)
+  # Suppress warnings for regex.c
+  set_source_files_properties(${REGEX_SOURCES} PROPERTIES COMPILE_FLAGS /w)
 else(WIN32)
   set(REGEX_SOURCES "")
 endif(WIN32)
 
 set(mapserver_SOURCES fontcache.c 
-cgiutil.c mapgeos.c maporaclespatial.c mapsearch.c mapwms.c classobject.c
+cgiutil.c mapgeos.c maporaclespatial.c mapsearch.c mapwms.cpp classobject.c
 mapgml.c mapoutput.c mapwmslayer.c layerobject.c mapgraticule.c mapows.c
 mapservutil.c mapxbase.c maphash.c mapowscommon.c mapshape.c mapxml.c mapbits.c
-maphttp.c mapparser.c mapstring.c mapxmp.c mapcairo.c mapimageio.c
+maphttp.c mapparser.c mapstring.cpp mapxmp.c mapcairo.c mapimageio.c
 mappluginlayer.c mapsymbol.c mapchart.c mapimagemap.c mappool.c maptclutf.c
-mapcluster.c mapio.c mappostgis.c maptemplate.c mapcontext.c mapjoin.c
+mapcluster.c mapio.c mappostgis.cpp maptemplate.c mapcontext.c mapjoin.c
 mappostgresql.c mapthread.c mapcopy.c maplabel.c mapprimitive.c maptile.c
 mapcpl.c maplayer.c mapproject.c maptime.c mapcrypto.c maplegend.c hittest.c
 maptree.c mapdebug.c maplexer.c mapquantization.c mapunion.c
 mapdraw.c maplibxml2.c mapquery.c maputil.c strptime.c mapdrawgdal.c
 mapraster.c mapuvraster.c mapdummyrenderer.c mapobject.c maprasterquery.c
-mapwcs.c maperror.c mapogcfilter.c mapregex.c mapwcs11.c mapfile.c
-mapogcfiltercommon.cpp maprendering.c mapwcs20.c mapogcsld.c mapmetadata.c
-mapresample.c mapwfs.c mapgdal.c mapogcsos.c mapscale.c mapwfs11.c mapwfs20.c
-mapgeomtransform.c mapogroutput.c mapwfslayer.c mapagg.cpp mapkml.cpp
+mapwcs.cpp maperror.c mapogcfilter.cpp mapregex.c mapwcs11.cpp mapfile.c
+mapogcfiltercommon.cpp maprendering.c mapwcs20.cpp mapogcsld.c mapmetadata.c
+mapresample.c mapwfs.cpp mapgdal.c mapogcsos.c mapscale.c mapwfs11.cpp mapwfs20.c
+mapgeomtransform.c mapogroutput.cpp mapwfslayer.c mapagg.cpp mapkml.cpp
 mapgeomutil.cpp mapkmlrenderer.cpp fontcache.c textlayout.c maputfgrid.cpp
 mapogr.cpp mapcontour.c mapsmoothing.c mapv8.cpp ${REGEX_SOURCES} kerneldensity.c 
-mapcompositingfilter.c mapmvt.c)
+mapcompositingfilter.c mapmvt.c mapiconv.c)
 
 set(mapserver_HEADERS
 cgiutil.h dejavu-sans-condensed.h dxfcolor.h fontcache.h hittest.h mapagg.h
@@ -292,7 +291,7 @@ maphttp.h mapio.h mapkmlrenderer.h maplibxml2.h mapogcfilter.h mapogcsld.h
 mapoglcontext.h mapoglrenderer.h mapowscommon.h mapows.h mapparser.h
 mappostgis.h mapprimitive.h mapproject.h mapraster.h mapregex.h mapresample.h
 mapserver-api.h mapserver.h mapserv.h mapshape.h mapsymbol.h maptemplate.h
-mapthread.h maptile.h maptime.h maptree.h maputfgrid.h mapwcs.h uthash.h)
+mapthread.h maptile.h maptime.h maptree.h maputfgrid.h mapwcs.h uthash.h mapiconv.h)
 
 if(WIN32)
 	configure_file(
@@ -544,7 +543,6 @@ endif(ORACLE_FOUND AND WITH_ORACLE_PLUGIN)
 if(WITH_MSSQL2008)
   find_package(ODBC)
   if(ODBC_FOUND)
-    include_directories(${ODBC_INCLUDE_DIR})
 	add_library(msplugin_mssql2008 MODULE mapmssql2008.c)
 	target_link_libraries(msplugin_mssql2008 ${ODBC_LIBRARY} ${MAPSERVER_LIBMAPSERVER})
     set_target_properties(msplugin_mssql2008 PROPERTIES COMPILE_FLAGS "-DUSE_MSSQL2008_PLUGIN -DUSE_MSSQL2008")
@@ -847,7 +845,8 @@ endif(UNIX)
 if (WIN32)
     ms_link_libraries( ${MS_EXTERNAL_LIBS} ws2_32.lib)
     if (MSVC)
-        set_target_properties(mapserver PROPERTIES COMPILE_FLAGS "/wd4267 /wd4244 /wd4018")
+        #4701 : Potentially uninitialized local variable 'name' used (https://docs.microsoft.com/en-us/cpp/error-messages/compiler-warnings/compiler-warning-level-4-c4701)
+        set_target_properties(mapserver PROPERTIES COMPILE_FLAGS "/EHsc /wd4267 /wd4244 /wd4018 /w14701")
     endif(MSVC)
 endif (WIN32)
 
@@ -866,6 +865,10 @@ if(BUILD_DYNAMIC)
     PUBLIC_HEADER "${mapserver_HEADERS};${PROJECT_BINARY_DIR}/mapserver-config.h;${PROJECT_BINARY_DIR}/mapserver-version.h"
   )
 endif(BUILD_DYNAMIC)
+
+if (NOT("${LIBMAPSERVER_EXTRA_FLAGS}" STREQUAL ""))
+  set_source_files_properties(${mapserver_SOURCES} PROPERTIES COMPILE_FLAGS ${LIBMAPSERVER_EXTRA_FLAGS})
+endif()
 
 macro(status_optional_component component enabled libpath)
   if("${enabled}" EQUAL "1")

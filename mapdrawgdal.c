@@ -676,7 +676,7 @@ int msDrawRasterLayerGDAL(mapObj *map, layerObj *layer, imageObj *image,
   if( hBandAlpha == NULL ) {
     int nMaskFlags = GDALGetMaskFlags(hBand1);
 
-    if( (CSLFetchNameValue( layer->processing, "BANDS" ) == NULL ) &&
+    if( CSLTestBoolean(CSLFetchNameValueDef( layer->processing, "USE_MASK_BAND", "YES" )) &&
         (nMaskFlags & GMF_PER_DATASET) != 0 &&
         (nMaskFlags & (GMF_NODATA|GMF_ALL_VALID)) == 0 ) {
       CPLErr eErr;
@@ -1931,7 +1931,10 @@ msDrawRasterLayerGDAL_16BitClassification(
   rasterBufferObj *mask_rb = NULL;
   rasterBufferObj s_mask_rb;
   int lastC;
-  struct mstimeval starttime, endtime;
+  struct mstimeval starttime={0}, endtime={0};
+
+  const char *pszClassifyScaled;
+  int bClassifyScaled = FALSE;
 
   if(layer->mask) {
     int ret;
@@ -1995,6 +1998,13 @@ msDrawRasterLayerGDAL_16BitClassification(
       fDataMax = MS_MAX(fDataMax,pafRawData[i]);
     }
   }
+
+  /* -------------------------------------------------------------------- */
+  /*      Fetch the scale classification option.                          */
+  /* -------------------------------------------------------------------- */
+  pszClassifyScaled = CSLFetchNameValue( layer->processing, "CLASSIFY_SCALED" );
+  if( pszClassifyScaled != NULL )
+    bClassifyScaled = CSLTestBoolean(pszClassifyScaled);
 
   /* -------------------------------------------------------------------- */
   /*      Fetch the scale processing option.                              */
@@ -2104,12 +2114,17 @@ msDrawRasterLayerGDAL_16BitClassification(
 
     cmap[i] = -1;
 
+    // i = (int) ((dfOriginalValue - dfScaleMin) * dfScaleRatio+1)-1;
     dfOriginalValue = (i+0.5) / dfScaleRatio + dfScaleMin;
 
     /* The creation of buckets takes a significant time when they are many, and many classes
        as well. When iterating over buckets, a faster strategy is to reuse first the last used
        class index. */
-    c = msGetClass_FloatRGB_WithFirstClassToTry(layer, (float) dfOriginalValue, -1, -1, -1, lastC);
+    if(bClassifyScaled == TRUE)
+      c = msGetClass_FloatRGB_WithFirstClassToTry(layer, (float) i, -1, -1, -1, lastC);
+    else
+      c = msGetClass_FloatRGB_WithFirstClassToTry(layer, (float) dfOriginalValue, -1, -1, -1, lastC);
+
     lastC = c;
     if( c != -1 ) {
       int s;

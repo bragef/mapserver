@@ -214,7 +214,7 @@ static char *msBuildURLFromWMSParams(wmsParamsObj *wmsparams)
  * by the caller.
  **********************************************************************/
 static int msBuildWMSLayerURLBase(mapObj *map, layerObj *lp,
-                                  wmsParamsObj *psWMSParams)
+                                  wmsParamsObj *psWMSParams, int nRequestType)
 {
   const char *pszOnlineResource, *pszVersion, *pszName, *pszFormat;
   const char *pszFormatList, *pszStyle, /* *pszStyleList,*/ *pszTime;
@@ -335,11 +335,14 @@ static int msBuildWMSLayerURLBase(mapObj *map, layerObj *lp,
     }
   }
 
-  /*  set STYLES no matter what, even if it's empty (i.e. "STYLES=")
-   *  styles is a required param of WMS
+  /*  set STYLE parameter no matter what, even if it's empty (i.e. "STYLES=")
+   *  GetLegendGraphic doesn't support multiple styles and is named STYLE
    */
-
-  msSetWMSParamString(psWMSParams, "STYLES", pszStyle, MS_TRUE, nVersion);
+  if (nRequestType == WMS_GETLEGENDGRAPHIC) {
+    msSetWMSParamString(psWMSParams, "STYLE", pszStyle, MS_TRUE, nVersion);
+  } else {
+    msSetWMSParamString(psWMSParams, "STYLES", pszStyle, MS_TRUE, nVersion);
+  }
 
   if (pszSLD != NULL) {
     /* Only SLD is set */
@@ -425,7 +428,9 @@ msBuildWMSLayerURL(mapObj *map, layerObj *lp, int nRequestType,
   int nVersion=OWS_VERSION_NOTSET;
   int bUseStrictAxisOrder = MS_FALSE; /* this is the assumption up to 1.1.0 */
   int bFlipAxisOrder = MS_FALSE;
-
+  const char *pszTmp;
+  int bIsEssential = MS_FALSE;
+  
   if (lp->connectiontype != MS_WMS) {
     msSetError(MS_WMSCONNERR, "Call supported only for CONNECTIONTYPE WMS",
                "msBuildWMSLayerURL()");
@@ -441,7 +446,7 @@ msBuildWMSLayerURL(mapObj *map, layerObj *lp, int nRequestType,
        (pszVersion = strstr(lp->connection, "WMTVER=")) == NULL &&
        (pszVersion = strstr(lp->connection, "wmtver=")) == NULL ) ) {
     /* CONNECTION missing or seems incomplete... try to build from metadata */
-    if (msBuildWMSLayerURLBase(map, lp, psWMSParams) != MS_SUCCESS)
+    if (msBuildWMSLayerURLBase(map, lp, psWMSParams, nRequestType) != MS_SUCCESS)
       return MS_FAILURE;  /* An error already produced. */
 
     /* If we received MS_SUCCESS then version must have been set */
@@ -776,6 +781,20 @@ msBuildWMSLayerURL(mapObj *map, layerObj *lp, int nRequestType,
    *   QUERY_LAYERS (for queryable layers only)
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------
+   * Sometimes a requested layer is essential for the map, so if the
+   * request fails or an error is delivered, the map has not to be drawn
+   * ------------------------------------------------------------------ */
+  if ((pszTmp = msOWSLookupMetadata(&(lp->metadata),
+                                    "MO", "essential")) != NULL) {
+    if( strcasecmp(pszTmp,"true") == 0
+        || strcasecmp(pszTmp,"on") == 0
+        || strcasecmp(pszTmp,"yes") == 0 )
+      bIsEssential = MS_TRUE;
+    else
+      bIsEssential = atoi(pszTmp);       
+  }
+
   if (nRequestType == WMS_GETFEATUREINFO) {
     char szBuf[100] = "";
 
@@ -857,6 +876,10 @@ msBuildWMSLayerURL(mapObj *map, layerObj *lp, int nRequestType,
     msSetWMSParamString(psWMSParams, "REQUEST", pszRequestParam, MS_FALSE, nVersion);
     msSetWMSParamString(psWMSParams, pszSrsParamName, pszEPSG, MS_FALSE, nVersion);
 
+    if (nVersion >= OWS_1_3_0) {
+      msSetWMSParamString(psWMSParams, "SLD_VERSION", "1.1.0", MS_FALSE, nVersion);
+    }
+
   } else { /* if (nRequestType == WMS_GETMAP) */
     char szBuf[100] = "";
 
@@ -867,11 +890,17 @@ msBuildWMSLayerURL(mapObj *map, layerObj *lp, int nRequestType,
 
     pszExceptionsParam = msOWSLookupMetadata(&(lp->metadata),
                          "MO", "exceptions_format");
-    if (pszExceptionsParam == NULL) {
-      if (nVersion >= OWS_1_1_0 && nVersion < OWS_1_3_0)
-        pszExceptionsParam = "application/vnd.ogc.se_inimage";
-      else
-        pszExceptionsParam = "INIMAGE";
+
+    if (!bIsEssential) {
+      if (pszExceptionsParam == NULL) {
+        if (nVersion >= OWS_1_1_0 && nVersion < OWS_1_3_0)
+          pszExceptionsParam = "application/vnd.ogc.se_inimage";
+        else
+          pszExceptionsParam = "INIMAGE";
+      }
+    } else {
+      /* if layer is essential, do not emit EXCEPTIONS parameter (defaults to XML) */
+      pszExceptionsParam = NULL;
     }
 
     msSetWMSParamString(psWMSParams, "REQUEST", pszRequestParam, MS_FALSE, nVersion);
@@ -887,7 +916,9 @@ msBuildWMSLayerURL(mapObj *map, layerObj *lp, int nRequestType,
                bbox.minx, bbox.miny, bbox.maxx, bbox.maxy);
     }
     msSetWMSParamString(psWMSParams, "BBOX",    szBuf, MS_TRUE, nVersion);
-    msSetWMSParamString(psWMSParams, "EXCEPTIONS",  pszExceptionsParam, MS_FALSE, nVersion);
+    if( pszExceptionsParam ) {
+      msSetWMSParamString(psWMSParams, "EXCEPTIONS",  pszExceptionsParam, MS_FALSE, nVersion);
+    }
   }
 
   free(pszEPSG);
@@ -951,8 +982,8 @@ int msPrepareWMSLayerRequest(int nLayerId, mapObj *map, layerObj *lp,
 #ifdef USE_WMS_LYR
   char *pszURL = NULL, *pszHTTPCookieData = NULL;
   const char *pszTmp;
-  rectObj bbox;
-  int bbox_width, bbox_height;
+  rectObj bbox = { 0 };
+  int bbox_width = 0, bbox_height = 0;
   int nTimeout, bOkToMerge, bForceSeparateRequest, bCacheToDisk;
   wmsParamsObj sThisWMSParams;
 
@@ -1271,6 +1302,22 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
   int currentconnectiontype;
   int numclasses;
   char *mem_filename = NULL;
+  const char *pszTmp;
+  int bIsEssential = MS_FALSE;
+
+  /* ------------------------------------------------------------------
+   * Sometimes a requested layer is essential for the map, so if the
+   * request fails or an error is delivered, the map has not to be drawn
+   * ------------------------------------------------------------------ */
+  if ((pszTmp = msOWSLookupMetadata(&(lp->metadata),
+                                    "MO", "essential")) != NULL) {
+    if( strcasecmp(pszTmp,"true") == 0
+        || strcasecmp(pszTmp,"on") == 0
+        || strcasecmp(pszTmp,"yes") == 0 )
+      bIsEssential = MS_TRUE;
+    else
+      bIsEssential = atoi(pszTmp);      
+  }
 
   /* ------------------------------------------------------------------
    * Find the request info for this layer in the array, based on nLayerId
@@ -1290,8 +1337,9 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
   if ( !MS_HTTP_SUCCESS( pasReqInfo[iReq].nStatus ) ) {
     /* ====================================================================
           Failed downloading layer... we log an error but we still return
-          SUCCESS here so that the layer is only skipped intead of aborting
+          SUCCESS here so that the layer is only skipped instead of aborting
           the whole draw map.
+          If the layer is essential the map is not to be drawn.
      ==================================================================== */
     msSetError(MS_WMSERR,
                "WMS GetMap request failed for layer '%s' (Status %d: %s).",
@@ -1299,14 +1347,18 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
                (lp->name?lp->name:"(null)"),
                pasReqInfo[iReq].nStatus, pasReqInfo[iReq].pszErrBuf );
 
-    return MS_SUCCESS;
+    if (!bIsEssential)
+      return MS_SUCCESS;
+    else
+      return MS_FAILURE;
   }
 
   /* ------------------------------------------------------------------
    * Check the Content-Type of the response to see if we got an exception,
    * if yes then try to parse it and pass the info to msSetError().
    * We log an error but we still return SUCCESS here so that the layer
-   * is only skipped intead of aborting the whole draw map.
+   * is only skipped instead of aborting the whole draw map.
+   * If the layer is essential the map is not to be drawn.
    * ------------------------------------------------------------------ */
   if (pasReqInfo[iReq].pszContentType &&
       (strcmp(pasReqInfo[iReq].pszContentType, "text/xml") == 0 ||
@@ -1351,7 +1403,10 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
                "msDrawWMSLayerLow()",
                (lp->name?lp->name:"(null)"), szBuf );
 
-    return MS_SUCCESS;
+    if (!bIsEssential)
+      return MS_SUCCESS;
+    else
+      return MS_FAILURE;
   }
 
   /* ------------------------------------------------------------------
@@ -1359,7 +1414,6 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
    * to attach a "VSI" name to this buffer.
    * ------------------------------------------------------------------ */
   if( pasReqInfo[iReq].pszOutputFile == NULL ) {
-    msCleanVSIDir( "/vsimem/msout" );
     mem_filename = msTmpFile(map, NULL, "/vsimem/msout/", "img.tmp" );
 
     VSIFCloseL(
@@ -1420,12 +1474,12 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
     if (wldfile && (strlen(wldfile)>=3))
       strcpy(wldfile+strlen(wldfile)-3, "wld");
     if (wldfile && (fp = VSIFOpenL(wldfile, "wt")) != NULL) {
-      double dfCellSizeX = MS_CELLSIZE(pasReqInfo[iReq].bbox.minx,
-                                       pasReqInfo[iReq].bbox.maxx,
-                                       pasReqInfo[iReq].width);
-      double dfCellSizeY = MS_CELLSIZE(pasReqInfo[iReq].bbox.maxy,
-                                       pasReqInfo[iReq].bbox.miny,
-                                       pasReqInfo[iReq].height);
+      double dfCellSizeX = MS_OWS_CELLSIZE(pasReqInfo[iReq].bbox.minx,
+                                           pasReqInfo[iReq].bbox.maxx,
+                                           pasReqInfo[iReq].width);
+      double dfCellSizeY = MS_OWS_CELLSIZE(pasReqInfo[iReq].bbox.maxy,
+                                           pasReqInfo[iReq].bbox.miny,
+                                           pasReqInfo[iReq].height);
       char world_text[5000];
 
       sprintf( world_text, "%.12f\n0\n0\n%.12f\n%.12f\n%.12f\n",
@@ -1441,7 +1495,7 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
       if (msDrawLayer(map, lp, img) != 0)
         status = MS_FAILURE;
 
-      if (!lp->debug)
+      if (!lp->debug || mem_filename != NULL)
         VSIUnlink( wldfile );
     } else {
       msSetError(MS_WMSCONNERR,
@@ -1453,7 +1507,7 @@ int msDrawWMSLayerLow(int nLayerId, httpRequestObj *pasReqInfo,
   }
 
   /* We're done with the remote server's response... delete it. */
-  if (!lp->debug)
+  if (!lp->debug || mem_filename != NULL)
     VSIUnlink(lp->data);
 
   /* restore prveious type */

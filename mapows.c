@@ -50,10 +50,12 @@
 ** msOWSInitRequestObj() initializes an owsRequestObj; i.e: sets
 ** all internal pointers to NULL.
 */
-static void msOWSInitRequestObj(owsRequestObj *ows_request)
+void msOWSInitRequestObj(owsRequestObj *ows_request)
 {
   ows_request->numlayers = 0;
+  ows_request->numwmslayerargs = 0;
   ows_request->enabled_layers = NULL;
+  ows_request->layerwmsfilterindex = NULL;
 
   ows_request->service = NULL;
   ows_request->version = NULL;
@@ -65,9 +67,10 @@ static void msOWSInitRequestObj(owsRequestObj *ows_request)
 ** msOWSClearRequestObj() releases all resources associated with an
 ** owsRequestObj.
 */
-static void msOWSClearRequestObj(owsRequestObj *ows_request)
+void msOWSClearRequestObj(owsRequestObj *ows_request)
 {
   msFree(ows_request->enabled_layers);
+  msFree(ows_request->layerwmsfilterindex);
   msFree(ows_request->service);
   msFree(ows_request->version);
   msFree(ows_request->request);
@@ -258,11 +261,13 @@ int msOWSDispatch(mapObj *map, cgiRequestObj *request, int ows_mode)
   }
 
   if (ows_request.service == NULL) {
+#ifdef USE_LIBXML2
     if (ows_request.request && EQUAL(ows_request.request, "GetMetadata")) {
       status = msMetadataDispatch(map, request, &ows_request);
       msOWSClearRequestObj(&ows_request);
       return status;
     }
+#endif
 #ifdef USE_WFS_SVR
     if( msOWSLookupMetadata(&(map->web.metadata), "FO", "cite_wfs2") != NULL ) {
       status = msWFSException(map, "service", MS_OWS_ERROR_MISSING_PARAMETER_VALUE, NULL );
@@ -887,7 +892,7 @@ const char *msOWSLookupMetadataWithLanguage(hashTableObj *metadata,
 {
   const char *value = NULL;
 
-  if ( name && validated_language ) {
+  if ( name && validated_language && validated_language[0] ) {
     size_t bufferSize = strlen(name)+strlen(validated_language)+2;
     char *name2 = (char *) msSmallMalloc( bufferSize );
     snprintf(name2, bufferSize, "%s.%s", name, validated_language);
@@ -990,6 +995,226 @@ const char *msOWSGetVersionString(int nVersion, char *pszBuffer)
 }
 
 
+/*
+** msOWSGetEPSGProj()
+**
+** Extract projection code for this layer/map.
+**
+** First look for a xxx_srs metadata. If not found then look for an EPSG
+** code in projectionObj, and if not found then return NULL.
+**
+** If bReturnOnlyFirstOne=TRUE and metadata contains multiple EPSG codes
+** then only the first one (which is assumed to be the layer's default
+** projection) is returned.
+*/
+void msOWSGetEPSGProj(projectionObj *proj, hashTableObj *metadata, const char *namespaces, int bReturnOnlyFirstOne, char **epsgCode)
+{
+  const char *value;
+  *epsgCode = NULL;
+
+  /* metadata value should already be in format "EPSG:n" or "AUTO:..." */
+  if (metadata && ((value = msOWSLookupMetadata(metadata, namespaces, "srs")) != NULL)) {
+    const char *space_ptr;
+    if (!bReturnOnlyFirstOne || (space_ptr = strchr(value,' ')) == NULL) {
+      *epsgCode = msStrdup(value);
+      return;
+    }
+    
+
+    *epsgCode = msSmallMalloc((space_ptr - value + 1)*sizeof(char));
+    /* caller requested only first projection code, copy up to the first space character*/
+    strlcpy(*epsgCode, value, space_ptr - value + 1) ;
+    return;
+  } else if (proj && proj->numargs > 0 && (value = strstr(proj->args[0], "init=epsg:")) != NULL) {
+    *epsgCode = msSmallMalloc((strlen("EPSG:")+strlen(value+10)+1)*sizeof(char));
+    sprintf(*epsgCode, "EPSG:%s", value+10);
+    return;
+  } else if (proj && proj->numargs > 0 && (value = strstr(proj->args[0], "init=crs:")) != NULL) {
+    *epsgCode = msSmallMalloc((strlen("CRS:")+strlen(value+9)+1)*sizeof(char));
+    sprintf(*epsgCode, "CRS:%s", value+9);
+    return;
+  } else if (proj && proj->numargs > 0 && (strncasecmp(proj->args[0], "AUTO:", 5) == 0 ||
+             strncasecmp(proj->args[0], "AUTO2:", 6) == 0)) {
+    *epsgCode = msStrdup(proj->args[0]);
+    return;
+  }
+}
+
+/*
+** msOWSProjectToWGS84()
+**
+** Reprojects the extent to WGS84.
+**
+*/
+void msOWSProjectToWGS84(projectionObj *srcproj, rectObj *ext)
+{
+  if (srcproj->proj && !msProjIsGeographicCRS(srcproj)) {
+    projectionObj wgs84;
+    msInitProjection(&wgs84);
+    msProjectionInheritContextFrom(&wgs84, srcproj);
+    msLoadProjectionString(&wgs84, "+proj=longlat +ellps=WGS84 +datum=WGS84");
+    msProjectRect(srcproj, &wgs84, ext);
+    msFreeProjection(&wgs84);
+  }
+}
+
+/* msOWSGetLanguage()
+**
+** returns the language via MAP/WEB/METADATA/ows_language
+**
+** Use value of "ows_language" metadata, if not set then
+** return "undefined" as a default
+*/
+const char *msOWSGetLanguage(mapObj *map, const char *context)
+{
+  const char *language;
+
+  /* if this is an exception, MapServer always returns Exception
+     messages in en-US
+  */
+  if (strcmp(context,"exception") == 0) {
+    language = MS_ERROR_LANGUAGE;
+  }
+  /* if not, fetch language from mapfile metadata */
+  else {
+    language = msLookupHashTable(&(map->web.metadata), "ows_language");
+
+    if (language == NULL) {
+      language = "undefined";
+    }
+  }
+  return language;
+}
+
+/* msOWSGetSchemasLocation()
+**
+** schemas location is the root of the web tree where all WFS-related
+** schemas can be found on this server.  These URLs must exist in order
+** to validate xml.
+**
+** Use value of "ows_schemas_location" metadata, if not set then
+** return ".." as a default
+*/
+const char *msOWSGetSchemasLocation(mapObj *map)
+{
+  const char *schemas_location;
+
+  schemas_location = msLookupHashTable(&(map->web.metadata),
+                                       "ows_schemas_location");
+  if (schemas_location == NULL)
+    schemas_location = OWS_DEFAULT_SCHEMAS_LOCATION;
+
+  return schemas_location;
+}
+
+/*
+** msOWSGetOnlineResource()
+**
+** Return the online resource for this service.  First try to lookup
+** specified metadata, and if not found then try to build the URL ourselves.
+**
+** Returns a newly allocated string that should be freed by the caller or
+** NULL in case of error.
+*/
+char * msOWSGetOnlineResource(mapObj *map, const char *namespaces, const char *metadata_name,
+                              cgiRequestObj *req)
+{
+  const char *value;
+  char *online_resource = NULL;
+
+  /* We need this script's URL, including hostname. */
+  /* Default to use the value of the "onlineresource" metadata, and if not */
+  /* set then build it: "http://$(SERVER_NAME):$(SERVER_PORT)$(SCRIPT_NAME)?" */
+  /* (+append the map=... param if it was explicitly passed in QUERY_STRING) */
+  /*  */
+  if ((value = msOWSLookupMetadata(&(map->web.metadata), namespaces, metadata_name))) {
+    online_resource = msOWSTerminateOnlineResource(value);
+  } else {
+    if ((online_resource = msBuildOnlineResource(map, req)) == NULL) {
+      msSetError(MS_CGIERR, "Impossible to establish server URL.  Please set \"%s\" metadata.", "msOWSGetOnlineResource()", metadata_name);
+      return NULL;
+    }
+  }
+
+  return online_resource;
+}
+
+/*
+** msOWSTerminateOnlineResource()
+**
+** Append trailing "?" or "&" to an onlineresource URL if it doesn't have
+** one already. The returned string is then ready to append GET parameters
+** to it.
+**
+** Returns a newly allocated string that should be freed by the caller or
+** NULL in case of error.
+*/
+char * msOWSTerminateOnlineResource(const char *src_url)
+{
+  char *online_resource = NULL;
+  size_t buffer_size = 0;
+
+  if (src_url == NULL)
+    return NULL;
+
+  buffer_size = strlen(src_url)+2;
+  online_resource = (char*) malloc(buffer_size);
+
+  if (online_resource == NULL) {
+    msSetError(MS_MEMERR, NULL, "msOWSTerminateOnlineResource()");
+    return NULL;
+  }
+
+  strlcpy(online_resource, src_url, buffer_size);
+
+  /* Append trailing '?' or '&' if missing. */
+  if (strchr(online_resource, '?') == NULL)
+    strlcat(online_resource, "?", buffer_size);
+  else {
+    char *c;
+    c = online_resource+strlen(online_resource)-1;
+    if (*c != '?' && *c != '&')
+      strlcpy(c+1, "&", buffer_size-strlen(online_resource));
+  }
+
+  return online_resource;
+}
+
+/************************************************************************/
+/*                         msUpdateGMLFieldMetadata                     */
+/*                                                                      */
+/*      Updates a fields GML metadata if it has not already             */
+/*      been set. Nullable is not implemented for all drivers           */
+/*      and can be set to 0 if unknown                                  */
+/************************************************************************/
+int msUpdateGMLFieldMetadata(layerObj *layer, const char *field_name, const char *gml_type,
+                             const char *gml_width, const char *gml_precision, const short nullable)
+{
+
+    char md_item_name[256];
+
+    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_type", field_name );
+    if( msLookupHashTable(&(layer->metadata), md_item_name) == NULL )
+    msInsertHashTable(&(layer->metadata), md_item_name, gml_type );
+
+    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_width", field_name );
+    if( strlen(gml_width) > 0
+        && msLookupHashTable(&(layer->metadata), md_item_name) == NULL )
+    msInsertHashTable(&(layer->metadata), md_item_name, gml_width );
+
+    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_precision", field_name );
+    if( strlen(gml_precision) > 0
+        && msLookupHashTable(&(layer->metadata), md_item_name) == NULL )
+    msInsertHashTable(&(layer->metadata), md_item_name, gml_precision );
+
+    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_nillable", field_name );
+    if( nullable > 0 
+        && msLookupHashTable(&(layer->metadata), md_item_name) == NULL )
+    msInsertHashTable(&(layer->metadata), md_item_name, "true" );
+
+    return MS_TRUE;
+}
+
 #if defined(USE_WMS_SVR) || defined (USE_WFS_SVR) || defined (USE_WCS_SVR) || defined(USE_SOS_SVR) || defined(USE_WMS_LYR) || defined(USE_WFS_LYR)
 
 /*
@@ -1072,80 +1297,6 @@ int msOWSNegotiateVersion(int requested_version, const int supported_versions[],
 }
 
 /*
-** msOWSTerminateOnlineResource()
-**
-** Append trailing "?" or "&" to an onlineresource URL if it doesn't have
-** one already. The returned string is then ready to append GET parameters
-** to it.
-**
-** Returns a newly allocated string that should be freed by the caller or
-** NULL in case of error.
-*/
-char * msOWSTerminateOnlineResource(const char *src_url)
-{
-  char *online_resource = NULL;
-  size_t buffer_size = 0;
-
-  if (src_url == NULL)
-    return NULL;
-
-  buffer_size = strlen(src_url)+2;
-  online_resource = (char*) malloc(buffer_size);
-
-  if (online_resource == NULL) {
-    msSetError(MS_MEMERR, NULL, "msOWSTerminateOnlineResource()");
-    return NULL;
-  }
-
-  strlcpy(online_resource, src_url, buffer_size);
-
-  /* Append trailing '?' or '&' if missing. */
-  if (strchr(online_resource, '?') == NULL)
-    strlcat(online_resource, "?", buffer_size);
-  else {
-    char *c;
-    c = online_resource+strlen(online_resource)-1;
-    if (*c != '?' && *c != '&')
-      strlcpy(c+1, "&", buffer_size-strlen(online_resource));
-  }
-
-  return online_resource;
-}
-
-/*
-** msOWSGetOnlineResource()
-**
-** Return the online resource for this service.  First try to lookup
-** specified metadata, and if not found then try to build the URL ourselves.
-**
-** Returns a newly allocated string that should be freed by the caller or
-** NULL in case of error.
-*/
-char * msOWSGetOnlineResource(mapObj *map, const char *namespaces, const char *metadata_name,
-                              cgiRequestObj *req)
-{
-  const char *value;
-  char *online_resource = NULL;
-
-  /* We need this script's URL, including hostname. */
-  /* Default to use the value of the "onlineresource" metadata, and if not */
-  /* set then build it: "http://$(SERVER_NAME):$(SERVER_PORT)$(SCRIPT_NAME)?" */
-  /* (+append the map=... param if it was explicitly passed in QUERY_STRING) */
-  /*  */
-  if ((value = msOWSLookupMetadata(&(map->web.metadata), namespaces, metadata_name))) {
-    online_resource = msOWSTerminateOnlineResource(value);
-  } else {
-    if ((online_resource = msBuildOnlineResource(map, req)) == NULL) {
-      msSetError(MS_CGIERR, "Impossible to establish server URL.  Please set \"%s\" metadata.", "msOWSGetOnlineResource()", metadata_name);
-      return NULL;
-    }
-  }
-
-  return online_resource;
-}
-
-
-/*
 ** msOWSGetOnlineResource()
 **
 ** Return the online resource for this service and add language parameter.
@@ -1158,7 +1309,7 @@ char * msOWSGetOnlineResource2(mapObj *map, const char *namespaces, const char *
 {
   char *online_resource = msOWSGetOnlineResource(map, namespaces, metadata_name, req);
 
-  if ( online_resource && validated_language ) {
+  if ( online_resource && validated_language && validated_language[0] ) {
     /* online_resource is already terminated, so we can simply add language=...& */
     /* but first we need to make sure that online_resource has enough capacity */
     online_resource = (char *)msSmallRealloc(online_resource, strlen(online_resource) + strlen(validated_language) +  11);
@@ -1168,27 +1319,6 @@ char * msOWSGetOnlineResource2(mapObj *map, const char *namespaces, const char *
   }
 
   return online_resource;
-}
-
-/* msOWSGetSchemasLocation()
-**
-** schemas location is the root of the web tree where all WFS-related
-** schemas can be found on this server.  These URLs must exist in order
-** to validate xml.
-**
-** Use value of "ows_schemas_location" metadata, if not set then
-** return ".." as a default
-*/
-const char *msOWSGetSchemasLocation(mapObj *map)
-{
-  const char *schemas_location;
-
-  schemas_location = msLookupHashTable(&(map->web.metadata),
-                                       "ows_schemas_location");
-  if (schemas_location == NULL)
-    schemas_location = OWS_DEFAULT_SCHEMAS_LOCATION;
-
-  return schemas_location;
 }
 
 /* msOWSGetInspireSchemasLocation()
@@ -1209,34 +1339,6 @@ const char *msOWSGetInspireSchemasLocation(mapObj *map)
     schemas_location = "http://inspire.ec.europa.eu/schemas";
 
   return schemas_location;
-}
-
-/* msOWSGetLanguage()
-**
-** returns the language via MAP/WEB/METADATA/ows_language
-**
-** Use value of "ows_language" metadata, if not set then
-** return "undefined" as a default
-*/
-const char *msOWSGetLanguage(mapObj *map, const char *context)
-{
-  const char *language;
-
-  /* if this is an exception, MapServer always returns Exception
-     messages in en-US
-  */
-  if (strcmp(context,"exception") == 0) {
-    language = MS_ERROR_LANGUAGE;
-  }
-  /* if not, fetch language from mapfile metadata */
-  else {
-    language = msLookupHashTable(&(map->web.metadata), "ows_language");
-
-    if (language == NULL) {
-      language = "undefined";
-    }
-  }
-  return language;
 }
 
 /* msOWSGetLanguageList
@@ -1444,7 +1546,7 @@ int msOWSPrintInspireCommonLanguages(FILE *stream, mapObj *map, const char *name
 
   char *default_language = msOWSGetLanguageFromList(map, namespaces, NULL);
 
-  if(validated_language && default_language) {
+  if(validated_language && validated_language[0] && default_language) {
     msIO_fprintf(stream, "    <inspire_common:SupportedLanguages>\n");
     msIO_fprintf(stream, "      <inspire_common:DefaultLanguage><inspire_common:Language>%s"
                  "</inspire_common:Language></inspire_common:DefaultLanguage>\n",
@@ -1547,7 +1649,7 @@ int msOWSPrintEncodeMetadata2(FILE *stream, hashTableObj *metadata,
     free(pszEncodedValue);
   } else {
     if (action_if_not_found == OWS_WARN) {
-      msIO_fprintf(stream, "<!-- WARNING: Mandatory metadata '%s%s%s%s' was missing in this context. -->\n", (namespaces?"..._":""), name, (validated_language?".":""), (validated_language?validated_language:""));
+      msIO_fprintf(stream, "<!-- WARNING: Mandatory metadata '%s%s%s%s' was missing in this context. -->\n", (namespaces?"..._":""), name, (validated_language && validated_language[0]?".":""), (validated_language && validated_language[0]?validated_language:""));
       status = action_if_not_found;
     }
 
@@ -2073,24 +2175,6 @@ int msOWSPrintEncodeParamList(FILE *stream, const char *name,
 
 
 /*
-** msOWSProjectToWGS84()
-**
-** Reprojects the extent to WGS84.
-**
-*/
-void msOWSProjectToWGS84(projectionObj *srcproj, rectObj *ext)
-{
-  if (srcproj->proj && !msProjIsGeographicCRS(srcproj)) {
-    projectionObj wgs84;
-    msInitProjection(&wgs84);
-    msProjectionInheritContextFrom(&wgs84, srcproj);
-    msLoadProjectionString(&wgs84, "+proj=longlat +ellps=WGS84 +datum=WGS84");
-    msProjectRect(srcproj, &wgs84, ext);
-    msFreeProjection(&wgs84);
-  }
-}
-
-/*
 ** msOWSPrintEX_GeographicBoundingBox()
 **
 ** Print a EX_GeographicBoundingBox tag for WMS1.3.0
@@ -2525,50 +2609,6 @@ char *msOWSBuildURLFilename(const char *pszPath, const char *pszURL,
 }
 
 /*
-** msOWSGetEPSGProj()
-**
-** Extract projection code for this layer/map.
-**
-** First look for a xxx_srs metadata. If not found then look for an EPSG
-** code in projectionObj, and if not found then return NULL.
-**
-** If bReturnOnlyFirstOne=TRUE and metadata contains multiple EPSG codes
-** then only the first one (which is assumed to be the layer's default
-** projection) is returned.
-*/
-void msOWSGetEPSGProj(projectionObj *proj, hashTableObj *metadata, const char *namespaces, int bReturnOnlyFirstOne, char **epsgCode)
-{
-  const char *value;
-  *epsgCode = NULL;
-
-  /* metadata value should already be in format "EPSG:n" or "AUTO:..." */
-  if (metadata && ((value = msOWSLookupMetadata(metadata, namespaces, "srs")) != NULL)) {
-    const char *space_ptr;
-    if (!bReturnOnlyFirstOne || (space_ptr = strchr(value,' ')) == NULL) {
-      *epsgCode = msStrdup(value);
-      return;
-    }
-    
-
-    *epsgCode = msSmallMalloc((space_ptr - value + 1)*sizeof(char));
-    /* caller requested only first projection code, copy up to the first space character*/
-    strlcpy(*epsgCode, value, space_ptr - value + 1) ;
-    return;
-  } else if (proj && proj->numargs > 0 && (value = strstr(proj->args[0], "init=epsg:")) != NULL) {
-    *epsgCode = msSmallMalloc((strlen("EPSG:")+strlen(value+10)+1)*sizeof(char));
-    sprintf(*epsgCode, "EPSG:%s", value+10);
-    return;
-  } else if (proj && proj->numargs > 0 && (value = strstr(proj->args[0], "init=crs:")) != NULL) {
-    *epsgCode = msSmallMalloc((strlen("CRS:")+strlen(value+9)+1)*sizeof(char));
-    sprintf(*epsgCode, "CRS:%s", value+9);
-    return;
-  } else if (proj && proj->numargs > 0 && (strncasecmp(proj->args[0], "AUTO:", 5) == 0 ||
-             strncasecmp(proj->args[0], "AUTO2:", 6) == 0)) {
-    *epsgCode = msStrdup(proj->args[0]);
-    return;
-  }
-}
-/*
 ** msOWSGetProjURN()
 **
 ** Fetch an OGC URN for this layer or map.  Similar to msOWSGetEPSGProj()
@@ -2899,7 +2939,4 @@ outputFormatObj* msOwsIsOutputFormatValid(mapObj *map, const char *format,
   return psFormat;
 }
 
-#endif /* USE_WMS_SVR || USE_WFS_SVR  || USE_WCS_SVR */
-
-
-
+#endif /* defined(USE_WMS_SVR) || defined (USE_WFS_SVR) || defined (USE_WCS_SVR) || defined(USE_SOS_SVR) || defined(USE_WMS_LYR) || defined(USE_WFS_LYR) */

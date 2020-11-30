@@ -88,6 +88,7 @@ static char *ms_errorCodes[MS_NUMERRORCODES] = {"",
                                                };
 #ifndef USE_THREAD
 
+/// Get the MapServer error object
 errorObj *msGetErrorObj()
 {
   static errorObj ms_error = {MS_NOERR, "", "", MS_FALSE, 0, NULL};
@@ -304,7 +305,7 @@ char *msAddErrorDisplayString(char *source, errorObj *error)
   return source;
 }
 
-char *msGetErrorString(char *delimiter)
+char *msGetErrorString(const char *delimiter)
 {
   char *errstr=NULL;
 

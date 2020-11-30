@@ -29,6 +29,7 @@
 
 #include "mapserver.h"
 #include "mapthread.h"
+#include "mapgdal.h"
 #include <assert.h>
 
 
@@ -95,7 +96,7 @@ void msGDALCleanup( void )
     } while( bDidSomething );
 
     while( iRepeat-- )
-    CPLPopErrorHandler();
+      CPLPopErrorHandler();
 
     msReleaseLock( TLOCK_GDAL );
 
@@ -147,6 +148,7 @@ int msSaveImageGDAL( mapObj *map, imageObj *image, const char *filenameIn )
   int bUseXmp = MS_FALSE;
   const char   *filename = NULL;
   char         *filenameToFree = NULL;
+  const char   *gdal_driver_shortname = format->driver+5;
 
   msGDALInitialize();
   memset(&rb,0,sizeof(rasterBufferObj));
@@ -162,11 +164,11 @@ int msSaveImageGDAL( mapObj *map, imageObj *image, const char *filenameIn )
   /*      Identify the proposed output driver.                            */
   /* -------------------------------------------------------------------- */
   msAcquireLock( TLOCK_GDAL );
-  hOutputDriver = GDALGetDriverByName( format->driver+5 );
+  hOutputDriver = GDALGetDriverByName( gdal_driver_shortname );
   if( hOutputDriver == NULL ) {
     msReleaseLock( TLOCK_GDAL );
     msSetError( MS_MISCERR, "Failed to find %s driver.",
-                "msSaveImageGDAL()", format->driver+5 );
+                "msSaveImageGDAL()", gdal_driver_shortname );
     return MS_FAILURE;
   }
 
@@ -182,8 +184,8 @@ int msSaveImageGDAL( mapObj *map, imageObj *image, const char *filenameIn )
     if( pszExtension == NULL )
       pszExtension = "img.tmp";
 
-    if( bUseXmp == MS_FALSE && GDALGetMetadataItem( hOutputDriver, GDAL_DCAP_VIRTUALIO, NULL )
-        != NULL ) {
+    if( bUseXmp == MS_FALSE &&
+        msGDALDriverSupportsVirtualIOOutput(hOutputDriver) ) {
       msCleanVSIDir( "/vsimem/msout" );
       filenameToFree = msTmpFile(map, NULL, "/vsimem/msout/", pszExtension );
     }
@@ -648,4 +650,15 @@ char *msProjectionObj2OGCWKT( projectionObj *projection )
     return NULL;
 }
 
+/************************************************************************/
+/*                    msGDALDriverSupportsVirtualIOOutput()             */
+/************************************************************************/
 
+int msGDALDriverSupportsVirtualIOOutput( GDALDriverH hDriver )
+{
+    /* We need special testing here for the netCDF driver, since recent */
+    /* GDAL versions advertize VirtualIO support, but this is only for the */
+    /* read-side of the driver, not the write-side. */
+    return GDALGetMetadataItem( hDriver, GDAL_DCAP_VIRTUALIO, NULL ) != NULL &&
+           !EQUAL(GDALGetDescription(hDriver), "netCDF");
+}

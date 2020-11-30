@@ -44,6 +44,7 @@
 extern int msyylex(void);
 extern void msyyrestart(FILE *);
 extern int msyylex_destroy(void);
+extern void msyycleanup_includes();
 
 extern double msyynumber;
 extern int msyylineno;
@@ -299,7 +300,7 @@ int msBuildPluginLibraryPath(char **dest, const char *lib_str, mapObj *map)
   char szLibPath[MS_MAXPATHLEN] = { '\0' };
   char szLibPathExt[MS_MAXPATHLEN] = { '\0' };
   const char *plugin_dir = NULL;
-  
+
   if (map)
     plugin_dir = msLookupHashTable(&(map->configoptions), "MS_PLUGIN_DIR");
 
@@ -972,7 +973,7 @@ static int loadFeature(layerObj *player, int type)
         msFreeShape(shape);
         msFree(shape);
         if(getString(&string) == MS_FAILURE) return(MS_FAILURE);
-        
+
         if((shape = msShapeFromWKT(string)) == NULL)
           status = MS_FAILURE;
 
@@ -1423,6 +1424,9 @@ void initLabel(labelObj *label)
 
   label->leader = NULL;
 
+  label->sizeunits = MS_INHERIT;
+  label->scalefactor = 1.0;
+
   return;
 }
 
@@ -1529,7 +1533,16 @@ static int loadLabel(labelObj *label)
         }
         break;
       case(ALIGN):
-        if((label->align = getSymbol(3, MS_ALIGN_LEFT,MS_ALIGN_CENTER,MS_ALIGN_RIGHT)) == -1) return(-1);
+        if((symbol = getSymbol(4, MS_ALIGN_LEFT,MS_ALIGN_CENTER,MS_ALIGN_RIGHT,MS_BINDING)) == -1)
+          return(-1);
+        if((symbol == MS_ALIGN_LEFT)||(symbol == MS_ALIGN_CENTER)||(symbol == MS_ALIGN_RIGHT)) {
+          label->align = symbol;
+        } else {
+          if (label->bindings[MS_LABEL_BINDING_ALIGN].item != NULL)
+            msFree(label->bindings[MS_LABEL_BINDING_ALIGN].item);
+          label->bindings[MS_LABEL_BINDING_ALIGN].item = msStrdup(msyystring_buffer);
+          label->numbindings++;
+        }
         break;
       case(ANTIALIAS): /*ignore*/
         msyylex();
@@ -1633,8 +1646,25 @@ static int loadLabel(labelObj *label)
         if(getInteger(&(label->minsize)) == -1) return(-1);
         break;
       case(OFFSET):
-        if(getInteger(&(label->offsetx)) == -1) return(-1);
-        if(getInteger(&(label->offsety)) == -1) return(-1);
+        if((symbol = getSymbol(2, MS_NUMBER,MS_BINDING)) == -1) return(MS_FAILURE);
+        if(symbol == MS_NUMBER)
+          label->offsetx = (int) msyynumber;
+        else {
+          if (label->bindings[MS_LABEL_BINDING_OFFSET_X].item != NULL)
+            msFree(label->bindings[MS_LABEL_BINDING_OFFSET_X].item);
+          label->bindings[MS_LABEL_BINDING_OFFSET_X].item = msStrdup(msyystring_buffer);
+          label->numbindings++;
+        }
+
+        if((symbol = getSymbol(2, MS_NUMBER,MS_BINDING)) == -1) return(MS_FAILURE);
+        if(symbol == MS_NUMBER)
+          label->offsety = (int) msyynumber;
+        else {
+          if (label->bindings[MS_LABEL_BINDING_OFFSET_Y].item != NULL)
+            msFree(label->bindings[MS_LABEL_BINDING_OFFSET_Y].item);
+          label->bindings[MS_LABEL_BINDING_OFFSET_Y].item = msStrdup(msyystring_buffer);
+          label->numbindings++;
+        }
         break;
       case(OUTLINECOLOR):
         if(loadColor(&(label->outlinecolor), &(label->bindings[MS_LABEL_BINDING_OUTLINECOLOR])) != MS_SUCCESS) return(-1);
@@ -1767,7 +1797,7 @@ int msUpdateLabelFromString(labelObj *label, char *string, int url_string)
   if(!label || !string) return MS_FAILURE;
 
   msAcquireLock( TLOCK_PARSER );
-  
+
   if(url_string)
     msyystate = MS_TOKENIZE_URL_STRING;
   else
@@ -1967,7 +1997,7 @@ void msFreeExpression(expressionObj *exp)
 
 int loadExpression(expressionObj *exp)
 {
-  /* TODO: should we fall msFreeExpression if exp->string != NULL? We do some checking to avoid a leak but is it enough... */ 
+  /* TODO: should we fall msFreeExpression if exp->string != NULL? We do some checking to avoid a leak but is it enough... */
 
   msyystring_icase = MS_TRUE;
   if((exp->type = getSymbol(6, MS_STRING,MS_EXPRESSION,MS_REGEX,MS_ISTRING,MS_IREGEX,MS_LIST)) == -1) return(-1);
@@ -2354,6 +2384,9 @@ int initStyle(styleObj *style)
     style->bindings[i].index = -1;
     msInitExpression(&(style->exprBindings[i]));
   }
+
+  style->sizeunits = MS_INHERIT;
+  style->scalefactor = 1.0;
 
   return MS_SUCCESS;
 }
@@ -2829,6 +2862,7 @@ int initClass(classObj *class)
   class->status = MS_ON;
   class->debug = MS_OFF;
   MS_REFCNT_INIT(class);
+  class->isfallback = FALSE;
 
   msInitExpression(&(class->expression));
   class->name = NULL;
@@ -2857,6 +2891,9 @@ int initClass(classObj *class)
   class->group = NULL;
 
   class->leader = NULL;
+
+  class->sizeunits = MS_INHERIT;
+  class->scalefactor = 1.0;
 
   return(0);
 }
@@ -3507,6 +3544,7 @@ int initLayer(layerObj *layer, mapObj *map)
   layer->group = NULL;
   layer->status = MS_OFF;
   layer->data = NULL;
+  layer->rendermode = MS_FIRST_MATCHING_CLASS;
 
   layer->map = map; /* point back to the encompassing structure */
 
@@ -3625,9 +3663,9 @@ int initLayer(layerObj *layer, mapObj *map)
   msInitExpression(&(layer->utfdata));
   layer->utfitem = NULL;
   layer->utfitemindex = -1;
-  
+
   layer->encoding = NULL;
-  
+
   layer->sortBy.nProperties = 0;
   layer->sortBy.properties = NULL;
   layer->orig_st = NULL;
@@ -3698,7 +3736,7 @@ int freeLayer(layerObj *layer)
   msProjectDestroyReprojector(layer->reprojectorMapToLayer);
   msFreeProjection(&(layer->projection));
   msFreeExpression(&layer->_geomtransform);
-  
+
   freeCluster(&layer->cluster);
 
   for(i=0; i<layer->maxclasses; i++) {
@@ -3752,9 +3790,9 @@ int freeLayer(layerObj *layer)
   if(layer->maskimage) {
     msFreeImage(layer->maskimage);
   }
-  
+
   if(layer->compositer) {
-    freeLayerCompositer(layer->compositer);    
+    freeLayerCompositer(layer->compositer);
   }
 
   if (layer->grid) {
@@ -3764,7 +3802,7 @@ int freeLayer(layerObj *layer)
 
   msFreeExpression(&(layer->utfdata));
   msFree(layer->utfitem);
-  
+
   for(i=0;i<layer->sortBy.nProperties;i++)
       msFree(layer->sortBy.properties[i].item);
   msFree(layer->sortBy.properties);
@@ -3840,7 +3878,7 @@ int loadScaletoken(scaleTokenObj *token, layerObj *layer) {
              case(EOF):
                msSetError(MS_EOFERR, NULL, "loadScaletoken()");
                return(MS_FAILURE);
-             case(END): 
+             case(END):
                stop = 1;
                if(token->n_entries == 0) {
                  msSetError(MS_PARSEERR,"Scaletoken (line:%d) has no VALUES defined","loadScaleToken()",msyylineno);
@@ -3851,7 +3889,7 @@ int loadScaletoken(scaleTokenObj *token, layerObj *layer) {
              case(MS_STRING):
                /* we have a key */
                token->tokens = msSmallRealloc(token->tokens,(token->n_entries+1)*sizeof(scaleTokenEntryObj));
-               
+
                if(1 != sscanf(msyystring_buffer,"%lf",&token->tokens[token->n_entries].minscale)) {
                  msSetError(MS_PARSEERR, "failed to parse SCALETOKEN VALUE (%s):(line %d), expecting \"minscale\"", "loadScaletoken()",
                          msyystring_buffer,msyylineno);
@@ -4659,7 +4697,7 @@ static void writeLayer(FILE *stream, int indent, layerObj *layer)
     writeIndent(stream, indent + 1);
     fprintf(stream, "GEOMTRANSFORM (%s)\n", layer->_geomtransform.string);
   }
-  
+
   writeString(stream, indent, "HEADER", NULL, layer->header);
   /* join - see below */
   writeKeyword(stream, indent, "LABELCACHE", layer->labelcache, 1, MS_OFF, "OFF");
@@ -5012,7 +5050,7 @@ static int loadOutputFormat(mapObj *map)
       }
       case(NAME):
         msFree( name );
-        if((name = getToken()) == NULL) 
+        if((name = getToken()) == NULL)
           goto load_output_error;
         break;
       case(MIMETYPE):
@@ -5862,6 +5900,7 @@ int initMap(mapObj *map)
   map->cellsize = 0;
   map->shapepath = NULL;
   map->mappath = NULL;
+  map->sldurl = NULL;
 
   MS_INIT_COLOR(map->imagecolor, 255,255,255,255); /* white */
 
@@ -6155,7 +6194,7 @@ int msSaveMap(mapObj *map, char *filename)
 {
   FILE *stream;
   char szPath[MS_MAXPATHLEN];
-  
+
   if(!map) {
     msSetError(MS_MISCERR, "Map is undefined.", "msSaveMap()");
     return(-1);
@@ -6390,7 +6429,7 @@ static int loadMapInternal(mapObj *map)
 mapObj *msLoadMapFromString(char *buffer, char *new_mappath)
 {
   mapObj *map;
-  struct mstimeval starttime, endtime;
+  struct mstimeval starttime = {0}, endtime = {0};
   char szPath[MS_MAXPATHLEN], szCWDPath[MS_MAXPATHLEN];
   char *mappath=NULL;
   int debuglevel;
@@ -6471,7 +6510,7 @@ mapObj *msLoadMapFromString(char *buffer, char *new_mappath)
 mapObj *msLoadMap(const char *filename, const char *new_mappath)
 {
   mapObj *map;
-  struct mstimeval starttime, endtime;
+  struct mstimeval starttime={0}, endtime={0};
   char szPath[MS_MAXPATHLEN], szCWDPath[MS_MAXPATHLEN];
   int debuglevel;
 
@@ -6567,6 +6606,7 @@ mapObj *msLoadMap(const char *filename, const char *new_mappath)
     msFreeMap(map);
     msReleaseLock( TLOCK_PARSER );
     if( msyyin ) {
+      msyycleanup_includes();
       fclose(msyyin);
       msyyin = NULL;
     }
@@ -6841,7 +6881,7 @@ static void layerSubstituteString(layerObj *layer, const char *from, const char 
   if(layer->tileindex) layer->tileindex = msCaseReplaceSubstring(layer->tileindex, from, to);
   if(layer->connection) layer->connection = msCaseReplaceSubstring(layer->connection, from, to);
   if(layer->filter.string) layer->filter.string = msCaseReplaceSubstring(layer->filter.string, from, to);
-  
+
   /* The bindvalues are most useful when able to substitute values from the URL */
   hashTableSubstituteString(&layer->bindvals, from, to);
   hashTableSubstituteString(&layer->metadata, from, to);

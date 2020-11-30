@@ -36,6 +36,8 @@
 #include <sys/stat.h>
 #include "mapaxisorder.h"
 
+#include "ogr_srs_api.h"
+
 static char *ms_proj_lib = NULL;
 #if PROJ_VERSION_MAJOR >= 6
 static unsigned ms_proj_lib_change_counter = 0;
@@ -66,6 +68,8 @@ struct reprojectionObj
     projectionObj* in;
     projectionObj* out;
     PJ* pj;
+    int should_do_line_cutting;
+    shapeObj splitShape;
     int bFreePJ;
 };
 
@@ -366,6 +370,7 @@ reprojectionObj* msProjectCreateReprojector(projectionObj* in, projectionObj* ou
     reprojectionObj* obj = (reprojectionObj*)msSmallCalloc(1, sizeof(reprojectionObj));
     obj->in = in;
     obj->out = out;
+    obj->should_do_line_cutting = -1;
 
     /* -------------------------------------------------------------------- */
     /*      If the source and destination are simple and equal, then do     */
@@ -448,6 +453,7 @@ void msProjectDestroyReprojector(reprojectionObj* reprojector)
         return;
     if( reprojector->bFreePJ )
         proj_destroy(reprojector->pj);
+    msFreeShape(&(reprojector->splitShape));
     msFree(reprojector);
 }
 
@@ -490,6 +496,8 @@ struct reprojectionObj
 {
     projectionObj* in;
     projectionObj* out;
+    int should_do_line_cutting;
+    shapeObj splitShape;
     int no_op;
 };
 
@@ -503,6 +511,7 @@ reprojectionObj* msProjectCreateReprojector(projectionObj* in, projectionObj* ou
     obj = (reprojectionObj*)msSmallCalloc(1, sizeof(reprojectionObj));
     obj->in = in;
     obj->out = out;
+    obj->should_do_line_cutting = -1;
 
     /* -------------------------------------------------------------------- */
     /*      If the source and destination are equal, then do nothing.       */
@@ -548,6 +557,7 @@ void msProjectDestroyReprojector(reprojectionObj* reprojector)
 {
     if( !reprojector )
         return;
+    msFreeShape(&(reprojector->splitShape));
     msFree(reprojector);
 }
 
@@ -825,11 +835,14 @@ int msProcessProjection(projectionObj *p)
 
 #if PROJ_VERSION_MAJOR >= 6
   {
-      char szTemp[24];
       char** args = (char**)msSmallMalloc(sizeof(char*) * (p->numargs+1));
       memcpy(args, p->args, sizeof(char*) * p->numargs);
 
+#if PROJ_VERSION_MAJOR == 6 && PROJ_VERSION_MINOR < 2
       /* PROJ lookups are faster with EPSG in uppercase. Fixed in PROJ 6.2 */
+      /* Do that only for those versions, as it can create confusion if using */
+      /* a real old-style 'epsg' file... */
+      char szTemp[24];
       if( p->numargs && strncmp(args[0], "init=epsg:", strlen("init=epsg:")) == 0 &&
           strlen(args[0]) < 24)
       {
@@ -837,6 +850,7 @@ int msProcessProjection(projectionObj *p)
           strcat(szTemp, args[0] + strlen("init=epsg:"));
           args[0] = szTemp;
       }
+#endif
 
       args[p->numargs] = (char*) "type=crs";
       if( !(p->proj = proj_create_argv(p->proj_ctx->proj_ctx, p->numargs + 1, args)) ) {
@@ -1131,6 +1145,96 @@ static int msProjectSegment( reprojectionObj* reprojector,
 }
 
 /************************************************************************/
+/*                   msProjectShapeShouldDoLineCutting()                */
+/************************************************************************/
+
+/* Detect projecting from north polar stereographic to longlat or EPSG:3857 */
+#ifdef USE_GEOS
+static int msProjectShapeShouldDoLineCutting(reprojectionObj* reprojector)
+{
+    if( reprojector->should_do_line_cutting >= 0)
+        return reprojector->should_do_line_cutting;
+
+    projectionObj *in = reprojector->in;
+    projectionObj *out = reprojector->out;
+    if( !(!in->gt.need_geotransform && !msProjIsGeographicCRS(in) &&
+            (msProjIsGeographicCRS(out) ||
+            (out->numargs == 1 && strcmp(out->args[0], "init=epsg:3857") == 0))) )
+    {
+        reprojector->should_do_line_cutting = MS_FALSE;
+        return MS_FALSE;
+    }
+
+    int srcIsPolar;
+    double extremeLongEasting;
+    if( msProjIsGeographicCRS(out) )
+    {
+        pointObj p;
+        double gt3 = out->gt.need_geotransform ? out->gt.geotransform[3] : 0.0;
+        double gt4 = out->gt.need_geotransform ? out->gt.geotransform[4] : 0.0;
+        double gt5 = out->gt.need_geotransform ? out->gt.geotransform[5] : 1.0;
+        p.x = 0.0;
+        p.y = 0.0;
+        srcIsPolar =  msProjectPointEx(reprojector, &p) == MS_SUCCESS &&
+                        fabs(gt3 + p.x * gt4 + p.y * gt5 - 90) < 1e-8;
+        extremeLongEasting = 180;
+    }
+    else
+    {
+        pointObj p1;
+        pointObj p2;
+        double gt1 = out->gt.need_geotransform ? out->gt.geotransform[1] : 1.0;
+        p1.x = 0.0;
+        p1.y = -0.1;
+        p2.x = 0.0;
+        p2.y = 0.1;
+        srcIsPolar =  msProjectPointEx(reprojector, &p1) == MS_SUCCESS &&
+                      msProjectPointEx(reprojector, &p2) == MS_SUCCESS &&
+                     fabs((p1.x - p2.x) * gt1) > 20e6;
+        extremeLongEasting = 20037508.3427892;
+    }
+    if( !srcIsPolar )
+    {
+        reprojector->should_do_line_cutting = MS_FALSE;
+        return MS_FALSE;
+    }
+
+    pointObj p;
+    double invgt0 = out->gt.need_geotransform ? out->gt.invgeotransform[0] : 0.0;
+    double invgt1 = out->gt.need_geotransform ? out->gt.invgeotransform[1] : 1.0;
+    double invgt3 = out->gt.need_geotransform ? out->gt.invgeotransform[3] : 0.0;
+    double invgt4 = out->gt.need_geotransform ? out->gt.invgeotransform[4] : 0.0;
+
+    lineObj newLine = {0,NULL};
+    const double EPS = 1e-10;
+
+    p.x = invgt0 + -extremeLongEasting * (1 - EPS) * invgt1;
+    p.y = invgt3 + -extremeLongEasting * (1 - EPS) * invgt4;
+    msProjectPoint(out, in, &p);
+    pointObj first = p;
+    msAddPointToLine(&newLine, &p );
+
+    p.x = invgt0 + extremeLongEasting * (1 - EPS) * invgt1;
+    p.y = invgt3 + extremeLongEasting * (1 - EPS) * invgt4;
+    msProjectPoint(out, in, &p);
+    msAddPointToLine(&newLine, &p );
+
+    p.x = 0;
+    p.y = 0;
+    msAddPointToLine(&newLine, &p );
+
+    msAddPointToLine(&newLine, &first );
+
+    msInitShape(&(reprojector->splitShape));
+    reprojector->splitShape.type = MS_SHAPE_POLYGON;
+    msAddLineDirectly(&(reprojector->splitShape), &newLine);
+
+    reprojector->should_do_line_cutting = MS_TRUE;
+    return MS_TRUE;
+}
+#endif
+
+/************************************************************************/
 /*                         msProjectShapeLine()                         */
 /*                                                                      */
 /*      Reproject a single linestring, potentially splitting into       */
@@ -1193,7 +1297,49 @@ msProjectShapeLine(reprojectionObj* reprojector,
 #undef p_y
 #endif
 
+#ifdef USE_GEOS
+  if( shape->type == MS_SHAPE_LINE &&
+      msProjectShapeShouldDoLineCutting(reprojector) )
+  {
+    shapeObj tmpShapeInputLine;
+    msInitShape(&tmpShapeInputLine);
+    tmpShapeInputLine.type = MS_SHAPE_LINE;
+    tmpShapeInputLine.numlines = 1;
+    tmpShapeInputLine.line = line;
 
+    shapeObj* diff = NULL;
+    if( msGEOSIntersects(&tmpShapeInputLine, &(reprojector->splitShape)) )
+    {
+        diff = msGEOSDifference(&tmpShapeInputLine, &(reprojector->splitShape));
+    }
+
+    tmpShapeInputLine.numlines = 0;
+    tmpShapeInputLine.line = NULL;
+    msFreeShape(&tmpShapeInputLine);
+
+    if( diff )
+    {
+        for(int j = 0; j < diff->numlines; j++ )
+        {
+            for( i=0; i < diff->line[j].numpoints; i++ ) {
+                msProjectPointEx(reprojector, &(diff->line[j].point[i]));
+            }
+            if( j == 0 )
+            {
+                line_out->numpoints = diff->line[j].numpoints;
+                memcpy(line_out->point, diff->line[0].point, sizeof(pointObj) * line_out->numpoints);
+            }
+            else
+            {
+                msAddLineDirectly(shape, &(diff->line[j]));
+            }
+        }
+        msFreeShape(diff);
+        msFree(diff);
+        return MS_SUCCESS;
+    }
+  }
+#endif
 
   wrap_test = out != NULL && out->proj != NULL && msProjIsGeographicCRS(out)
               && !msProjIsGeographicCRS(in);
@@ -1223,14 +1369,27 @@ msProjectShapeLine(reprojectionObj* reprojector,
       else
         pt1Geo = wrkPoint; /* this is a cop out */
 
-      dist = wrkPoint.x - pt1Geo.x;
+      if( out->gt.need_geotransform && out->gt.geotransform[2] == 0 ) {
+        dist = out->gt.geotransform[1] * (wrkPoint.x - pt1Geo.x);
+      } else {
+        dist = wrkPoint.x - pt1Geo.x;
+      }
+
       if( fabs(dist) > 180.0
           && msTestNeedWrap( thisPoint, lastPoint,
                              pt1Geo, reprojector ) ) {
-        if( dist > 0.0 )
-          wrkPoint.x -= 360.0;
-        else if( dist < 0.0 )
-          wrkPoint.x += 360.0;
+        if( out->gt.need_geotransform && out->gt.geotransform[2] == 0 ) {
+          if( dist > 0.0 )
+            wrkPoint.x -= 360.0 * out->gt.invgeotransform[1];
+          else if( dist < 0.0 )
+            wrkPoint.x += 360.0 * out->gt.invgeotransform[1];
+        }
+        else {
+          if( dist > 0.0 )
+            wrkPoint.x -= 360.0;
+          else if( dist < 0.0 )
+            wrkPoint.x += 360.0;
+        }
       }
     }
 
@@ -2099,6 +2258,7 @@ static int msTestNeedWrap( pointObj pt1, pointObj pt2, pointObj pt2_geo,
 
 {
   pointObj  middle;
+  projectionObj* out = reprojector->out;
 
   middle.x = (pt1.x + pt2.x) * 0.5;
   middle.y = (pt1.y + pt2.y) * 0.5;
@@ -2112,8 +2272,13 @@ static int msTestNeedWrap( pointObj pt1, pointObj pt2, pointObj pt2_geo,
    * If the last point was moved, then we are considered due for a
    * move to.
    */
-  if( fabs(pt2_geo.x-pt2.x) > 180.0 )
-    return 1;
+  if( out->gt.need_geotransform && out->gt.geotransform[2] == 0 ) {
+    if( fabs( (pt2_geo.x-pt2.x) * out->gt.geotransform[1] ) > 180.0 )
+      return 1;
+  } else {
+    if( fabs(pt2_geo.x-pt2.x) > 180.0 )
+      return 1;
+  }
 
   /*
    * Otherwise, test to see if the middle point transforms
@@ -2235,6 +2400,14 @@ void msSetPROJ_LIB( const char *proj_lib, const char *pszRelToPath )
     ms_proj_lib = msStrdup( proj_lib );
 #endif
   msReleaseLock( TLOCK_PROJ );
+
+#if GDAL_VERSION_MAJOR >= 3
+  if( ms_proj_lib != NULL )
+  {
+    const char* const apszPaths[] = { ms_proj_lib, NULL };
+    OSRSetPROJSearchPaths(apszPaths);
+  }
+#endif
 
   if ( extended_path )
     msFree( extended_path );

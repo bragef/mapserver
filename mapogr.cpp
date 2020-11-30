@@ -2628,7 +2628,6 @@ msOGRPassThroughFieldDefinitions( layerObj *layer, msOGRFileInfo *psInfo )
 
   for(i=0; i<numitems; i++) {
     OGRFieldDefnH hField = OGR_FD_GetFieldDefn( hDefn, i );
-    char md_item_name[256];
     char gml_width[32], gml_precision[32];
     const char *gml_type = NULL;
     const char *item = OGR_Fld_GetNameRef( hField );
@@ -2680,19 +2679,7 @@ msOGRPassThroughFieldDefinitions( layerObj *layer, msOGRFileInfo *psInfo )
         break;
     }
 
-    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_type", item );
-    if( msOWSLookupMetadata(&(layer->metadata), "G", "type") == NULL )
-      msInsertHashTable(&(layer->metadata), md_item_name, gml_type );
-
-    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_width", item );
-    if( strlen(gml_width) > 0
-        && msOWSLookupMetadata(&(layer->metadata), "G", "width") == NULL )
-      msInsertHashTable(&(layer->metadata), md_item_name, gml_width );
-
-    snprintf( md_item_name, sizeof(md_item_name), "gml_%s_precision",item );
-    if( strlen(gml_precision) > 0
-        && msOWSLookupMetadata(&(layer->metadata), "G", "precision")==NULL )
-      msInsertHashTable(&(layer->metadata), md_item_name, gml_precision );
+    msUpdateGMLFieldMetadata(layer, item, gml_type, gml_width, gml_precision, 0);
   }
 
   /* Should we try to address style items, or other special items? */
@@ -2823,6 +2810,7 @@ msOGRFileNextShape(layerObj *layer, shapeObj *shape,
     psInfo->last_record_index_read++;
 
     if(layer->numitems > 0) {
+      if (shape->values) msFreeCharArray(shape->values, shape->numvalues);
       shape->values = msOGRGetValues(layer, hFeature);
       shape->numvalues = layer->numitems;
       if(!shape->values) {
@@ -3446,7 +3434,11 @@ static int  msOGRExtractTopSpatialFilter( msOGRFileInfo *info,
                                           pSpatialFilterNode);
   }
 
-  if( (expr->m_nToken == MS_TOKEN_COMPARISON_INTERSECTS || expr->m_nToken == MS_TOKEN_COMPARISON_CONTAINS ) &&
+  if( (expr->m_nToken == MS_TOKEN_COMPARISON_INTERSECTS ||
+      expr->m_nToken == MS_TOKEN_COMPARISON_OVERLAPS ||
+      expr->m_nToken == MS_TOKEN_COMPARISON_CROSSES ||
+      expr->m_nToken == MS_TOKEN_COMPARISON_WITHIN ||
+      expr->m_nToken == MS_TOKEN_COMPARISON_CONTAINS) &&
       expr->m_aoChildren.size() == 2 &&
       expr->m_aoChildren[1]->m_nToken == MS_TOKEN_LITERAL_SHAPE )
   {

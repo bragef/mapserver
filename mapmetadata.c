@@ -31,6 +31,7 @@
 #include "mapowscommon.h"
 #include "maplibxml2.h"
 
+#ifdef USE_LIBXML2
 
 /************************************************************************/
 /*                   _msMetadataGetCharacterString                      */
@@ -64,7 +65,6 @@ xmlNodePtr _msMetadataGetCharacterString(xmlNsPtr namespace, const char *name, c
 
 static
 xmlNodePtr _msMetadataGetURL(xmlNsPtr namespace, const char *name, const char *value, xmlNsPtr* ppsNsGco) {
-
   xmlNodePtr psNode = NULL;
 
   if( *ppsNsGco == NULL )
@@ -230,7 +230,6 @@ xmlNodePtr _msMetadataGetDecimal(xmlNsPtr namespace, const char *name, double va
 /*      Create a gmd:name/gmd:* code list element pattern               */
 /************************************************************************/
 
-static
 xmlNodePtr _msMetadataGetCodeList(xmlNsPtr namespace, const char *parent_element, const char *name, const char *value) {
   char *codelist = NULL;
   xmlNodePtr psNode = NULL;
@@ -245,36 +244,6 @@ xmlNodePtr _msMetadataGetCodeList(xmlNsPtr namespace, const char *parent_element
   xmlNewProp(psCodeNode, BAD_CAST "codeList", BAD_CAST codelist);
   xmlNewProp(psCodeNode, BAD_CAST "codeListValue", BAD_CAST value);
   msFree(codelist);
-  return psNode;
-}
-
-
-/************************************************************************/
-/*                   _msMetadataGetDate                                 */
-/*                                                                      */
-/*      Create a gmd:date or gmd:dateStamp element pattern              */
-/************************************************************************/
-
-static
-xmlNodePtr _msMetadataGetDate(xmlNsPtr namespace, const char *parent_element, const char *date_type, const char *value, xmlNsPtr* ppsNsGco) {
-
-  xmlNodePtr psNode = NULL;
-  xmlNodePtr psNode2 = NULL;
-
-  if( *ppsNsGco == NULL )
-    *ppsNsGco = xmlNewNs(NULL, BAD_CAST "http://www.isotc211.org/2005/gmd", BAD_CAST "gco");
-
-  psNode = xmlNewNode(namespace, BAD_CAST parent_element);
-
-  if (date_type == NULL) {  /* it's a gmd:dateStamp */
-      xmlNewChild(psNode, *ppsNsGco, BAD_CAST "Date", BAD_CAST value);
-      return psNode;
-  }
-
-  psNode2 = xmlNewChild(psNode, namespace, BAD_CAST "date", NULL);
-  xmlNewChild(psNode2, *ppsNsGco, BAD_CAST "Date", BAD_CAST value);
-  xmlAddChild(psNode, _msMetadataGetCodeList(namespace, "dateType", "CI_DateTypeCode", date_type));
-
   return psNode;
 }
 
@@ -312,7 +281,7 @@ xmlNodePtr _msMetadataGetGMLTimePeriod(char **temporal)
 static
 xmlNodePtr _msMetadataGetExtent(xmlNsPtr namespace, layerObj *layer, xmlNsPtr *ppsNsGco)
 {
-  int n;
+  int n = 0;
   int status;
   char *value = NULL;
   char **temporal = NULL;
@@ -529,8 +498,12 @@ xmlNodePtr _msMetadataGetIdentificationInfo(xmlNsPtr namespace, mapObj *map, lay
   xmlAddChild(psCINode, _msMetadataGetCharacterString(namespace, "title", value, ppsNsGco));
 
   psDNode = xmlNewChild(psCINode, namespace, BAD_CAST "date", NULL);
+  xmlNewNsProp(psDNode, *ppsNsGco, BAD_CAST "nilReason", BAD_CAST "missing");
 
-  xmlAddChild(psDNode, _msMetadataGetDate(namespace, "CI_Date", "publication", "2011", ppsNsGco));
+  value = (char *)msOWSLookupMetadata(&(layer->metadata), "MCFGO", "attribution_title");
+  if (value) {
+      xmlAddChild(psCINode, _msMetadataGetCharacterString(namespace, "otherCitationDetails", value, ppsNsGco));
+  }
 
   value = (char *)msOWSLookupMetadata(&(layer->metadata), "MCFGO", "abstract");
   if (!value)
@@ -693,7 +666,7 @@ xmlNodePtr msMetadataGetExceptionReport(mapObj *map, char *code, char *locator, 
 /************************************************************************/
 /*                   msMetadataGetLayerMetadata                         */
 /*                                                                      */
-/*      Generate an ISO 19139:2007 representation of layer metadata     */
+/*      Generate an ISO 19139-1:2019 representation of layer metadata   */
 /************************************************************************/
 
 static
@@ -862,6 +835,8 @@ int msMetadataDispatch(mapObj *map, cgiRequestObj *cgi_request, owsRequestObj *o
 
   return status;
 }
+
+#endif /* USE_LIBXML2 */
 
 /************************************************************************/
 /*                           msMetadataCreateParamsObj                  */

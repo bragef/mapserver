@@ -30,8 +30,8 @@
    This special exception was added by the Free Software Foundation in
    version 2.2 of Bison.  */
 
-#ifndef YY_YY_HOME_EVEN_MAPSERVER_MAPSERVER_MAPPARSER_H_INCLUDED
-# define YY_YY_HOME_EVEN_MAPSERVER_MAPSERVER_MAPPARSER_H_INCLUDED
+#ifndef YY_YY_MAPPARSER_H_INCLUDED
+# define YY_YY_MAPPARSER_H_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -152,7 +152,7 @@ union YYSTYPE
   struct tm tmval;
   shapeObj *shpval;
 
-#line 156 "/home/even/mapserver/mapserver/mapparser.h" /* yacc.c:1909  */
+#line 156 "mapparser.h" /* yacc.c:1909  */
 };
 
 typedef union YYSTYPE YYSTYPE;
@@ -164,4 +164,4 @@ typedef union YYSTYPE YYSTYPE;
 
 int yyparse (parseObj *p);
 
-#endif /* !YY_YY_HOME_EVEN_MAPSERVER_MAPSERVER_MAPPARSER_H_INCLUDED  */
+#endif /* !YY_YY_MAPPARSER_H_INCLUDED  */

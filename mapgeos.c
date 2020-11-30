@@ -804,7 +804,22 @@ shapeObj *msGEOSOffsetCurve(shapeObj *p, double offset) {
   g1 = (GEOSGeom) p->geometry;
   if(!g1) return NULL;
   
-  g2 = GEOSOffsetCurve_r(handle,g1, offset, 4, GEOSBUF_JOIN_MITRE, fabs(offset*1.5));
+  if (GEOSGeomTypeId_r(handle,g1) == GEOS_MULTILINESTRING)
+  {
+    GEOSGeom *lines = malloc(p->numlines*sizeof(GEOSGeom));
+    if (!lines) return NULL;
+    for(int i=0; i<p->numlines; i++)
+    {
+      lines[i] = GEOSOffsetCurve_r(handle, GEOSGetGeometryN_r(handle,g1,i),
+                                   offset, 4, GEOSBUF_JOIN_MITRE, fabs(offset*1.5));
+    }
+    g2 = GEOSGeom_createCollection_r(handle,GEOS_MULTILINESTRING, lines, p->numlines);
+    free(lines);
+  }
+  else
+  {
+    g2 = GEOSOffsetCurve_r(handle,g1, offset, 4, GEOSBUF_JOIN_MITRE, fabs(offset*1.5));
+  }
   return msGEOSGeometry2Shape(g2);
 #else
   msSetError(MS_GEOSERR, "GEOS Offset Curve support is not available.", "msGEOSingleSidedBuffer()");
@@ -943,6 +958,7 @@ pointObj *msGEOSGetCentroid(shapeObj *shape)
   if(!g1) return NULL;
 
   g2 = GEOSGetCentroid_r(handle,g1);
+  if (!g2) return NULL;
 
   point = (pointObj *) malloc(sizeof(pointObj));
 
@@ -952,7 +968,7 @@ pointObj *msGEOSGetCentroid(shapeObj *shape)
   GEOSCoordSeq_getY_r(handle,coords, 0, &(point->y));
   /* GEOSCoordSeq_getZ(coords, 0, &(point->z)); */
 
-  GEOSCoordSeq_destroy_r(handle,coords);
+  GEOSGeom_destroy_r(handle, g2);
 
   return point;
 #else

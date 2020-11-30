@@ -36,7 +36,8 @@
 #include "mapserver.h"
 #include "fontcache.h"
 
-
+#include "cpl_vsi.h"
+#include "cpl_string.h"
 
 
 
@@ -141,6 +142,16 @@ void msCopyTextSymbol(textSymbolObj *dst, textSymbolObj *src) {
   if(dst->textpath) {
     dst->textpath = msSmallMalloc(sizeof(textPathObj));
     msCopyTextPath(dst->textpath,src->textpath);
+  }
+  if(dst->style_bounds) {
+    int i;
+    dst->style_bounds = msSmallCalloc(src->label->numstyles, sizeof(label_bounds*));
+    for(i=0; i<src->label->numstyles; i++) {
+      if(src->style_bounds[i]) {
+        dst->style_bounds[i] = msSmallMalloc(sizeof(label_bounds));
+        copyLabelBounds(dst->style_bounds[i], src->style_bounds[i]);
+      }
+    }
   }
 }
 
@@ -774,8 +785,8 @@ int msFreeFontSet(fontSetObj *fontset)
 
 int msLoadFontSet(fontSetObj *fontset, mapObj *map)
 {
-  FILE *stream;
-  char buffer[MS_BUFFER_LENGTH];
+  VSILFILE *stream;
+  const char* line;
   char alias[64], file1[MS_PATH_LENGTH], file2[MS_PATH_LENGTH];
   char *path;
   char szPath[MS_MAXPATHLEN];
@@ -798,7 +809,7 @@ int msLoadFontSet(fontSetObj *fontset, mapObj *map)
   /* return(-1); */
   /* } */
 
-  stream = fopen( msBuildPath(szPath, fontset->map->mappath, fontset->filename), "r");
+  stream = VSIFOpenL( msBuildPath(szPath, fontset->map->mappath, fontset->filename), "rb");
   if(!stream) {
     msSetError(MS_IOERR, "Error opening fontset %s.", "msLoadFontset()",
                fontset->filename);
@@ -806,12 +817,12 @@ int msLoadFontSet(fontSetObj *fontset, mapObj *map)
   }
 
   i = 0;
-  while(fgets(buffer, MS_BUFFER_LENGTH, stream)) { /* while there's something to load */
+  while( (line = CPLReadLineL(stream)) != NULL ) { /* while there's something to load */
 
-    if(buffer[0] == '#' || buffer[0] == '\n' || buffer[0] == '\r' || buffer[0] == ' ')
+    if(line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == ' ')
       continue; /* skip comments and blank lines */
 
-    sscanf(buffer,"%s %s", alias,  file1);
+    sscanf(line,"%s %s", alias,  file1);
 
     if (!(*file1) || !(*alias) || (strlen(file1) <= 0))
       continue;
@@ -845,7 +856,7 @@ int msLoadFontSet(fontSetObj *fontset, mapObj *map)
   }
 
   fontset->numfonts = i;
-  fclose(stream); /* close the file */
+  VSIFCloseL(stream); /* close the file */
   free(path);
 
   return(0);
