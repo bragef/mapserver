@@ -192,6 +192,7 @@ DBFHandle msDBFOpen( const char * pszFilename, const char * pszAccess )
   pabyBuf = (uchar *) msSmallMalloc(500);
   if( VSIFReadL( pabyBuf, 32, 1, psDBF->fp ) != 1 )
   {
+    VSIFCloseL( psDBF->fp );
     msFree(psDBF);
     msFree(pabyBuf);
     return( NULL );
@@ -202,6 +203,13 @@ DBFHandle msDBFOpen( const char * pszFilename, const char * pszAccess )
 
   psDBF->nHeaderLength = nHeadLen = pabyBuf[8] + pabyBuf[9]*256;
   psDBF->nRecordLength = nRecLen = pabyBuf[10] + pabyBuf[11]*256;
+
+  if (nHeadLen <= 32) {
+    VSIFCloseL( psDBF->fp );
+    msFree(psDBF);
+    msFree(pabyBuf);
+    return( NULL );
+  }
 
   psDBF->nFields = nFields = (nHeadLen - 32) / 32;
 
@@ -217,6 +225,7 @@ DBFHandle msDBFOpen( const char * pszFilename, const char * pszAccess )
   if( VSIFReadL( pabyBuf, nHeadLen - 32, 1, psDBF->fp ) != 1 )
   {
     msFree(psDBF->pszCurrentRecord);
+    VSIFCloseL( psDBF->fp );
     msFree(psDBF);
     msFree(pabyBuf);
     return( NULL );
@@ -681,7 +690,7 @@ DBFFieldType msDBFGetFieldInfo( DBFHandle psDBF, int iField, char * pszFieldName
 static int msDBFWriteAttribute(DBFHandle psDBF, int hEntity, int iField, void * pValue )
 {
   unsigned int          nRecordOffset;
-  int  i, len;
+  int  len;
   uchar *pabyRec;
   char  szSField[40];
 
@@ -701,7 +710,7 @@ static int msDBFWriteAttribute(DBFHandle psDBF, int hEntity, int iField, void * 
     flushRecord( psDBF );
 
     psDBF->nRecords++;
-    for( i = 0; i < psDBF->nRecordLength; i++ )
+    for( unsigned i = 0; i < psDBF->nRecordLength; i++ )
       psDBF->pszCurrentRecord[i] = ' ';
 
     psDBF->nCurrentRecord = hEntity;

@@ -703,7 +703,7 @@ void msDrawRasterLayerLowCloseDataset(layerObj *layer, void* hDS)
 
 int msDrawRasterLayerLowCheckIfMustDraw(mapObj *map, layerObj *layer)
 {
-  if(!layer->data && !layer->tileindex && !(layer->connectiontype==MS_KERNELDENSITY)) {
+  if(!layer->data && !layer->tileindex && !(layer->connectiontype==MS_KERNELDENSITY || layer->connectiontype==MS_IDW)) {
     if(layer->debug == MS_TRUE)
       msDebug( "msDrawRasterLayerLow(%s): layer data and tileindex NULL ... doing nothing.", layer->name );
     return(0);
@@ -832,9 +832,9 @@ int msDrawRasterLayerLowWithDataset(mapObj *map, layerObj *layer, imageObj *imag
       done = MS_TRUE; /* only one image so we're done after this */
     }
     
-    if(layer->connectiontype == MS_KERNELDENSITY) {
+    if(layer->connectiontype == MS_KERNELDENSITY || layer->connectiontype == MS_IDW) {
       msAcquireLock( TLOCK_GDAL );
-      status = msComputeKernelDensityDataset(map, image, layer, &hDS, &kernel_density_cleanup_ptr);
+      status = msInterpolationDataset(map, image, layer, &hDS, &kernel_density_cleanup_ptr);
       if(status != MS_SUCCESS) {
         msReleaseLock( TLOCK_GDAL );
         final_status = status;
@@ -942,7 +942,7 @@ int msDrawRasterLayerLowWithDataset(mapObj *map, layerObj *layer, imageObj *imag
     ** default to keeping open for single data files, and
     ** to closing for tile indexes
     */
-    if(layer->connectiontype == MS_KERNELDENSITY) {
+    if(layer->connectiontype == MS_KERNELDENSITY || layer->connectiontype == MS_IDW) {
       /*
       ** Fix issue #5330
       ** The in-memory kernel density heatmap gdal dataset handle (hDS) gets re-used
@@ -966,8 +966,8 @@ cleanup:
   if(layer->tileindex) { /* tiling clean-up */
     msDrawRasterCleanupTileLayer(tlp, tilelayerindex);
   }
-  if(layer->connectiontype == MS_KERNELDENSITY && kernel_density_cleanup_ptr) {
-    msCleanupKernelDensityDataset(map, image, layer, kernel_density_cleanup_ptr);
+  if(kernel_density_cleanup_ptr) {
+    msCleanupInterpolationDataset(map, image, layer, kernel_density_cleanup_ptr);
   }
 
   return final_status;
@@ -984,27 +984,37 @@ imageObj *msDrawReferenceMap(mapObj *map)
   char szPath[MS_MAXPATHLEN];
   int status = MS_SUCCESS;
 
-  imageObj   *image = NULL;
+  imageObj *image = NULL;
   styleObj style;
 
+  /* check to see if we have enough information to actually proceed */
+  if(!map->reference.image || map->reference.height == 0 || map->reference.width == 0) {
+    msSetError(MS_MISCERR, "Reference map configuration error.", "msDrawReferenceMap()");
+    return NULL;
+  }
 
   rendererVTableObj *renderer = MS_MAP_RENDERER(map);
   rasterBufferObj *refImage = (rasterBufferObj*)calloc(1,sizeof(rasterBufferObj));
   MS_CHECK_ALLOC(refImage, sizeof(rasterBufferObj), NULL);
 
   if(MS_SUCCESS != renderer->loadImageFromFile(msBuildPath(szPath, map->mappath, map->reference.image),refImage)) {
-    msSetError(MS_MISCERR,"error loading reference image %s","msDrawREferenceMap()",szPath);
+    msSetError(MS_MISCERR,"Error loading reference image %s.","msDrawReferenceMap()",szPath);
+    free(refImage);
     return NULL;
   }
 
   image = msImageCreate(refImage->width, refImage->height, map->outputformat,
                         map->web.imagepath, map->web.imageurl, map->resolution, map->defresolution, &(map->reference.color));
-  if(!image) return NULL;
+  if(!image)
+  {
+      free(refImage);
+      return NULL;
+  }
 
   status = renderer->mergeRasterBuffer(image,refImage,1.0,0,0,0,0,refImage->width, refImage->height);
   msFreeRasterBuffer(refImage);
   free(refImage);
-  if(UNLIKELY(status == MS_FAILURE))
+  if(MS_UNLIKELY(status == MS_FAILURE))
     return NULL;
 
   /* make sure the extent given in mapfile fits the image */
@@ -1052,7 +1062,7 @@ imageObj *msDrawReferenceMap(mapObj *map)
     if( map->reference.maxboxsize == 0 ||
         ((abs(x2 - x1) < map->reference.maxboxsize) &&
          (abs(y2 - y1) < map->reference.maxboxsize)) ) {
-      if(UNLIKELY(MS_FAILURE == msDrawShadeSymbol(map, image, &rect, &style, 1.0))) {
+      if(MS_UNLIKELY(MS_FAILURE == msDrawShadeSymbol(map, image, &rect, &style, 1.0))) {
         msFreeImage(image);
         return NULL;
       }
@@ -1076,7 +1086,7 @@ imageObj *msDrawReferenceMap(mapObj *map)
           style.symbol = msGetSymbolIndex(&map->symbolset,  map->reference.markername, MS_TRUE);
         }
 
-        if(UNLIKELY(MS_FAILURE == msDrawMarkerSymbol(map, image, &point, &style, 1.0))) {
+        if(MS_UNLIKELY(MS_FAILURE == msDrawMarkerSymbol(map, image, &point, &style, 1.0))) {
           msFreeImage(image);
           return NULL;
         }
@@ -1115,7 +1125,7 @@ imageObj *msDrawReferenceMap(mapObj *map)
         cross.line[3].point[1].x = x21+8;
         cross.line[3].point[1].y = y21;
 
-        if(UNLIKELY(MS_FAILURE == msDrawLineSymbol(map,image,&cross,&style,1.0))) {
+        if(MS_UNLIKELY(MS_FAILURE == msDrawLineSymbol(map,image,&cross,&style,1.0))) {
           msFreeImage(image);
           return NULL;
         }

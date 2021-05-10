@@ -98,6 +98,16 @@ int msValidateParameter(const char *value, const char *pattern1, const char *pat
   return(MS_FAILURE);
 }
 
+int msIsValidRegex(const char* e) {
+  ms_regex_t re;
+  if(ms_regcomp(&re, e, MS_REG_EXTENDED|MS_REG_NOSUB) != 0) {
+    msSetError(MS_REGEXERR, "Failed to compile expression (%s).", "msEvalRegex()", e);
+    return(MS_FALSE);
+  }
+  ms_regfree(&re);
+  return MS_TRUE;
+}
+
 int msEvalRegex(const char *e, const char *s)
 {
   ms_regex_t re;
@@ -105,6 +115,26 @@ int msEvalRegex(const char *e, const char *s)
   if(!e || !s) return(MS_FALSE);
 
   if(ms_regcomp(&re, e, MS_REG_EXTENDED|MS_REG_NOSUB) != 0) {
+    msSetError(MS_REGEXERR, "Failed to compile expression (%s).", "msEvalRegex()", e);
+    return(MS_FALSE);
+  }
+
+  if(ms_regexec(&re, s, 0, NULL, 0) != 0) { /* no match */
+    ms_regfree(&re);
+    return(MS_FALSE);
+  }
+  ms_regfree(&re);
+
+  return(MS_TRUE);
+}
+
+int msCaseEvalRegex(const char *e, const char *s)
+{
+  ms_regex_t re;
+
+  if(!e || !s) return(MS_FALSE);
+
+  if(ms_regcomp(&re, e, MS_REG_EXTENDED|MS_REG_ICASE|MS_REG_NOSUB) != 0) {
     msSetError(MS_REGEXERR, "Failed to compile expression (%s).", "msEvalRegex()", e);
     return(MS_FALSE);
   }
@@ -420,6 +450,7 @@ int loadColor(colorObj *color, attributeBindingObj *binding)
       return MS_FAILURE;
     }
   } else {
+    assert(binding);
     binding->item = msStrdup(msyystring_buffer);
     binding->index = -1;
   }
@@ -1608,9 +1639,6 @@ static int loadLabel(labelObj *label)
       case(LEADER):
         msSetError(MS_MISCERR, "LABEL LEADER not implemented. LEADER goes at the CLASS level." , "loadLabel()");
         return(-1);
-        label->leader = msSmallMalloc(sizeof(labelLeaderObj));
-        if(loadLeader(label->leader) == -1) return(-1);
-        break;
       case(MAXSIZE):
         if(getInteger(&(label->maxsize)) == -1) return(-1);
         break;
@@ -1937,12 +1965,8 @@ char* msWriteLabelToString(labelObj *label)
 
 void msInitExpression(expressionObj *exp)
 {
+  memset(exp, 0, sizeof(*exp));
   exp->type = MS_STRING;
-  exp->string = NULL;
-  exp->native_string = NULL;
-  exp->compiled = MS_FALSE;
-  exp->flags = 0;
-  exp->tokens = exp->curtoken = NULL;
 }
 
 void msFreeExpressionTokens(expressionObj *exp)
@@ -1997,7 +2021,7 @@ void msFreeExpression(expressionObj *exp)
 
 int loadExpression(expressionObj *exp)
 {
-  /* TODO: should we fall msFreeExpression if exp->string != NULL? We do some checking to avoid a leak but is it enough... */
+  /* TODO: should we call msFreeExpression if exp->string != NULL? We do some checking to avoid a leak but is it enough... */
 
   msyystring_icase = MS_TRUE;
   if((exp->type = getSymbol(6, MS_STRING,MS_EXPRESSION,MS_REGEX,MS_ISTRING,MS_IREGEX,MS_LIST)) == -1) return(-1);
@@ -2006,6 +2030,7 @@ int loadExpression(expressionObj *exp)
     msFree(exp->native_string);
   }
   exp->string = msStrdup(msyystring_buffer);
+  exp->native_string = NULL;
 
   if(exp->type == MS_ISTRING) {
     exp->flags = exp->flags | MS_EXP_INSENSITIVE;
@@ -2364,6 +2389,7 @@ int initStyle(styleObj *style)
   style->polaroffsetpixel = style->polaroffsetangle = 0; /* no polar offset */
   style->angle = 0;
   style->autoangle= MS_FALSE;
+  style->antialiased = MS_TRUE;
   style->opacity = 100; /* fully opaque */
 
   msInitExpression(&(style->_geomtransform));
@@ -2426,8 +2452,11 @@ int loadStyle(styleObj *style)
           style->autoangle=MS_TRUE;
         }
         break;
-      case(ANTIALIAS): /*ignore*/
-        msyylex();
+      case(ANTIALIAS):
+        if ((symbol = getSymbol(2, MS_TRUE,MS_FALSE)) == -1) return(-1);
+        if (symbol == MS_FALSE) {
+            style->antialiased = MS_FALSE;
+        }
         break;
       case(BACKGROUNDCOLOR):
         if(loadColor(&(style->backgroundcolor), NULL) != MS_SUCCESS) return(MS_FAILURE);
@@ -2736,7 +2765,7 @@ void writeStyle(FILE *stream, int indent, styleObj *style)
     msIO_fprintf(stream, "GEOMTRANSFORM (%s)\n", style->_geomtransform.string);
   }
   else if(style->_geomtransform.type != MS_GEOMTRANSFORM_NONE) {
-    writeKeyword(stream, indent, "GEOMTRANSFORM", style->_geomtransform.type, 7,
+    writeKeyword(stream, indent, "GEOMTRANSFORM", style->_geomtransform.type, 8,
                  MS_GEOMTRANSFORM_BBOX, "\"bbox\"",
                  MS_GEOMTRANSFORM_END, "\"end\"",
                  MS_GEOMTRANSFORM_LABELPOINT, "\"labelpnt\"",
@@ -3384,12 +3413,15 @@ int loadClass(classObj *class, layerObj *layer)
 static int classResolveSymbolNames(classObj *class)
 {
   int i,j;
+  int try_addimage_if_notfound = MS_TRUE;
+
+  if(msyysource == MS_URL_TOKENS) try_addimage_if_notfound = MS_FALSE;
 
   /* step through styles and labels to resolve symbol names */
   /* class styles */
   for(i=0; i<class->numstyles; i++) {
     if(class->styles[i]->symbolname) {
-      if((class->styles[i]->symbol =  msGetSymbolIndex(&(class->layer->map->symbolset), class->styles[i]->symbolname, MS_TRUE)) == -1) {
+      if((class->styles[i]->symbol =  msGetSymbolIndex(&(class->layer->map->symbolset), class->styles[i]->symbolname, try_addimage_if_notfound)) == -1) {
         msSetError(MS_MISCERR, "Undefined symbol \"%s\" in class, style %d of layer %s.", "classResolveSymbolNames()", class->styles[i]->symbolname, i, class->layer->name);
         return MS_FAILURE;
       }
@@ -3400,7 +3432,7 @@ static int classResolveSymbolNames(classObj *class)
   for(i=0; i<class->numlabels; i++) {
     for(j=0; j<class->labels[i]->numstyles; j++) {
       if(class->labels[i]->styles[j]->symbolname) {
-        if((class->labels[i]->styles[j]->symbol =  msGetSymbolIndex(&(class->layer->map->symbolset), class->labels[i]->styles[j]->symbolname, MS_TRUE)) == -1) {
+        if((class->labels[i]->styles[j]->symbol =  msGetSymbolIndex(&(class->layer->map->symbolset), class->labels[i]->styles[j]->symbolname, try_addimage_if_notfound)) == -1) {
           msSetError(MS_MISCERR, "Undefined symbol \"%s\" in class, label style %d of layer %s.", "classResolveSymbolNames()", class->labels[i]->styles[j]->symbolname, j, class->layer->name);
           return MS_FAILURE;
         }
@@ -3637,8 +3669,6 @@ int initLayer(layerObj *layer, mapObj *map)
   initHashTable(&(layer->bindvals));
   initHashTable(&(layer->validation));
 
-  layer->dump = MS_FALSE;
-
   layer->styleitem = NULL;
   layer->styleitemindex = -1;
 
@@ -3862,6 +3892,7 @@ scaleTokenObj *msGrowLayerScaletokens( layerObj *layer )
 }
 
 int loadScaletoken(scaleTokenObj *token, layerObj *layer) {
+  (void)layer;
   for(;;) {
     int stop = 0;
     switch(msyylex()) {
@@ -4122,7 +4153,7 @@ int loadLayer(layerObj *layer, mapObj *map)
         }
         break;
       case(CONNECTIONTYPE):
-        if((type = getSymbol(11, MS_OGR, MS_POSTGIS, MS_WMS, MS_ORACLESPATIAL, MS_WFS, MS_GRATICULE, MS_PLUGIN, MS_UNION, MS_UVRASTER, MS_CONTOUR, MS_KERNELDENSITY)) == -1) return(-1);
+        if((type = getSymbol(12, MS_OGR, MS_POSTGIS, MS_WMS, MS_ORACLESPATIAL, MS_WFS, MS_GRATICULE, MS_PLUGIN, MS_UNION, MS_UVRASTER, MS_CONTOUR, MS_KERNELDENSITY, MS_IDW)) == -1) return(-1);
         layer->connectiontype = type;
         break;
       case(DATA):
@@ -4139,9 +4170,6 @@ int loadLayer(layerObj *layer, mapObj *map)
       case(DEBUG):
         if((layer->debug = getSymbol(3, MS_ON,MS_OFF, MS_NUMBER)) == -1) return(-1);
         if(layer->debug == MS_NUMBER) layer->debug = (int) msyynumber;
-        break;
-      case(DUMP):
-        if((layer->dump = getSymbol(2, MS_TRUE,MS_FALSE)) == -1) return(-1);
         break;
       case(EOF):
         msSetError(MS_EOFERR, NULL, "loadLayer()");
@@ -4682,7 +4710,7 @@ static void writeLayer(FILE *stream, int indent, layerObj *layer)
   writeCluster(stream, indent, &(layer->cluster));
   writeLayerCompositer(stream, indent, layer->compositer);
   writeString(stream, indent, "CONNECTION", NULL, layer->connection);
-  writeKeyword(stream, indent, "CONNECTIONTYPE", layer->connectiontype, 10, MS_OGR, "OGR", MS_POSTGIS, "POSTGIS", MS_WMS, "WMS", MS_ORACLESPATIAL, "ORACLESPATIAL", MS_WFS, "WFS", MS_PLUGIN, "PLUGIN", MS_UNION, "UNION", MS_UVRASTER, "UVRASTER", MS_CONTOUR, "CONTOUR", MS_KERNELDENSITY, "KERNELDENSITY");
+  writeKeyword(stream, indent, "CONNECTIONTYPE", layer->connectiontype, 11, MS_OGR, "OGR", MS_POSTGIS, "POSTGIS", MS_WMS, "WMS", MS_ORACLESPATIAL, "ORACLESPATIAL", MS_WFS, "WFS", MS_PLUGIN, "PLUGIN", MS_UNION, "UNION", MS_UVRASTER, "UVRASTER", MS_CONTOUR, "CONTOUR", MS_KERNELDENSITY, "KERNELDENSITY", MS_IDW, "IDW");
   writeHashTableInline(stream, indent, "CONNECTIONOPTIONS", &(layer->connectionoptions));
   writeString(stream, indent, "DATA", NULL, layer->data);
   writeNumber(stream, indent, "DEBUG", 0, layer->debug); /* is this right? see loadLayer() */
@@ -6042,10 +6070,6 @@ int msFreeLabelCacheSlot(labelCacheSlotObj *cacheslot)
       }
       msFree(cacheslot->labels[i].textsymbols);
 
-#ifdef include_deprecated
-      for(j=0; j<cacheslot->labels[i].numstyles; j++) freeStyle(&(cacheslot->labels[i].styles[j]));
-      msFree(cacheslot->labels[i].styles);
-#endif
       if(cacheslot->labels[i].leaderline) {
         msFree(cacheslot->labels[i].leaderline->point);
         msFree(cacheslot->labels[i].leaderline);
@@ -6379,6 +6403,10 @@ static int loadMapInternal(mapObj *map)
         break;
       case(DEFRESOLUTION):
         if(getDouble(&(map->defresolution)) == -1) return MS_FAILURE;
+        if (map->defresolution <= 0) {
+            msSetError(MS_MISCERR, "DEFRESOLUTION must be greater than 0", "loadMapInternal()");
+            return MS_FAILURE;
+        }
         break;
       case(SCALE):
       case(SCALEDENOM):
@@ -6453,7 +6481,7 @@ mapObj *msLoadMapFromString(char *buffer, char *new_mappath)
   MS_CHECK_ALLOC(map, sizeof(mapObj), NULL);
 
   if(initMap(map) == -1) { /* initialize this map */
-    msFree(map);
+    msFreeMap(map);
     return(NULL);
   }
 
@@ -6545,7 +6573,7 @@ mapObj *msLoadMap(const char *filename, const char *new_mappath)
   MS_CHECK_ALLOC(map, sizeof(mapObj), NULL);
 
   if(initMap(map) == -1) { /* initialize this map */
-    msFree(map);
+    msFreeMap(map);
     return(NULL);
   }
 
@@ -6647,17 +6675,6 @@ int msUpdateMapFromURL(mapObj *map, char *variable, char *string)
   switch(msyylex()) {
     case(MAP):
       switch(msyylex()) {
-        case(CONFIG): {
-          char *key=NULL, *value=NULL;
-          if((getString(&key) != MS_FAILURE) && (getString(&value) != MS_FAILURE)) {
-            msSetConfigOption( map, key, value );
-            free( key );
-            key=NULL;
-            free( value );
-            value=NULL;
-          }
-        }
-        break;
         case(EXTENT):
           msyystate = MS_TOKENIZE_URL_STRING;
           msyystring = string;
@@ -6759,22 +6776,9 @@ int msUpdateMapFromURL(mapObj *map, char *variable, char *string)
             if(msUpdateLayerFromString((GET_LAYER(map, i)), string, MS_TRUE) != MS_SUCCESS) return MS_FAILURE;
           }
 
-          /* make sure any symbol names for this layer have been resolved (bug #2700) */
-          for(j=0; j<GET_LAYER(map, i)->numclasses; j++) {
-            for(k=0; k<GET_LAYER(map, i)->class[j]->numstyles; k++) {
-              if(GET_LAYER(map, i)->class[j]->styles[k]->symbolname && GET_LAYER(map, i)->class[j]->styles[k]->symbol == 0) {
-                if((GET_LAYER(map, i)->class[j]->styles[k]->symbol =  msGetSymbolIndex(&(map->symbolset), GET_LAYER(map, i)->class[j]->styles[k]->symbolname, MS_TRUE)) == -1) {
-                  msSetError(MS_MISCERR, "Undefined symbol \"%s\" in class %d, style %d of layer %s.", "msUpdateMapFromURL()", GET_LAYER(map, i)->class[j]->styles[k]->symbolname, j, k, GET_LAYER(map, i)->name);
-                  return MS_FAILURE;
-                }
-              }
-              if(!MS_IS_VALID_ARRAY_INDEX(GET_LAYER(map, i)->class[j]->styles[k]->symbol, map->symbolset.numsymbols)) {
-                msSetError(MS_MISCERR, "Invalid symbol index in class %d, style %d of layer %s.", "msUpdateMapFromURL()", j, k, GET_LAYER(map, i)->name);
-                return MS_FAILURE;
-              }
-            }
-          }
-
+          // make sure symbols are resolved
+          if (resolveSymbolNames(map) == MS_FAILURE) return MS_FAILURE;
+ 
           break;
         case(LEGEND):
           if(msyylex() == LABEL) {
@@ -6802,6 +6806,10 @@ int msUpdateMapFromURL(mapObj *map, char *variable, char *string)
           msyylex();
 
           if(getDouble(&(map->defresolution)) == -1) break;
+          if (map->defresolution <= 0) {
+              msSetError(MS_MISCERR, "DEFRESOLUTION must be greater than 0", "msUpdateMapFromURL()");
+              break;
+          }
           break;
         case(SCALEBAR):
           return msUpdateScalebarFromString(&(map->scalebar), string, MS_TRUE);
@@ -7165,12 +7173,16 @@ static char **tokenizeMapInternal(char *filename, int *ret_numtokens)
 
     if(numtokens_allocated <= numtokens) {
       numtokens_allocated *= 2; /* double size of the array every time we reach the limit */
-      tokens = (char **)realloc(tokens, numtokens_allocated*sizeof(char*));
-      if(tokens == NULL) {
+      char** tokensNew = (char **)realloc(tokens, numtokens_allocated*sizeof(char*));
+      if(tokensNew == NULL) {
         msSetError(MS_MEMERR, "Realloc() error.", "msTokenizeMap()");
         fclose(msyyin);
+        for(int i=0; i<numtokens; i++)
+            msFree(tokens[i]);
+        msFree(tokens);
         return NULL;
       }
+      tokens = tokensNew;
     }
 
     switch(msyylex()) {

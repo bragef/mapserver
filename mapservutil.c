@@ -33,6 +33,8 @@
 #include "maptime.h"
 #include "mapows.h"
 
+#include "cpl_conv.h"
+
 /*
 ** Enumerated types, keep the query modes in sequence and at the end of the enumeration (mode enumeration is in maptemplate.h).
 */
@@ -197,38 +199,67 @@ mapObj *msCGILoadMap(mapservObj *mapserv)
   int i, j;
   mapObj *map = NULL;
 
+  const char *ms_map_bad_pattern_default = "[/\\]{2}|[/\\]?\\.+[/\\]|,";
+  const char *ms_map_env_bad_pattern_default = "^(AUTH_.*|CERT_.*|CONTENT_(LENGTH|TYPE)|DOCUMENT_(ROOT|URI)|GATEWAY_INTERFACE|HTTP.*|QUERY_STRING|PATH_(INFO|TRANSLATED)|REMOTE_.*|REQUEST_(METHOD|URI)|SCRIPT_(FILENAME|NAME)|SERVER_.*)";
+
+  int ms_mapfile_tainted = MS_TRUE;
+  const char *ms_mapfile = CPLGetConfigOption("MS_MAPFILE", NULL);
+
+  const char *ms_map_no_path = CPLGetConfigOption("MS_MAP_NO_PATH", NULL);
+  const char *ms_map_pattern = CPLGetConfigOption("MS_MAP_PATTERN", NULL);
+  const char *ms_map_env_pattern = CPLGetConfigOption("MS_MAP_ENV_PATTERN", NULL);
+
+  const char *ms_map_bad_pattern = CPLGetConfigOption("MS_MAP_BAD_PATTERN", NULL);
+  if(ms_map_bad_pattern == NULL) ms_map_bad_pattern = ms_map_bad_pattern_default;
+
+  const char *ms_map_env_bad_pattern = CPLGetConfigOption("MS_MAP_ENV_BAD_PATTERN", NULL);
+  if(ms_map_env_bad_pattern == NULL) ms_map_env_bad_pattern = ms_map_env_bad_pattern_default;
+
   for(i=0; i<mapserv->request->NumParams; i++) /* find the mapfile parameter first */
     if(strcasecmp(mapserv->request->ParamNames[i], "map") == 0) break;
 
   if(i == mapserv->request->NumParams) {
-    char *ms_mapfile = getenv("MS_MAPFILE");
-    if(ms_mapfile) {
-      map = msLoadMap(ms_mapfile,NULL);
-    } else {
+    if(ms_mapfile == NULL) {
       msSetError(MS_WEBERR, "CGI variable \"map\" is not set.", "msCGILoadMap()"); /* no default, outta here */
       return NULL;
     }
+    ms_mapfile_tainted = MS_FALSE;
   } else {
-    if(getenv(mapserv->request->ParamValues[i])) /* an environment variable references the actual file to use */
-      map = msLoadMap(getenv(mapserv->request->ParamValues[i]), NULL);
-    else {
-      /* by here we know the request isn't for something in an environment variable */
-      if(getenv("MS_MAP_NO_PATH")) {
-        msSetError(MS_WEBERR, "Mapfile not found in environment variables and this server is not configured for full paths.", "msCGILoadMap()");
+    if(getenv(mapserv->request->ParamValues[i])) { /* an environment variable references the actual file to use */
+      /* validate env variable name */
+      if(msIsValidRegex(ms_map_env_bad_pattern) == MS_FALSE || msCaseEvalRegex(ms_map_env_bad_pattern, mapserv->request->ParamValues[i]) == MS_TRUE) {
+        msSetError(MS_WEBERR, "CGI variable \"map\" fails to validate.", "msCGILoadMap()");
         return NULL;
       }
-
-      if(getenv("MS_MAP_PATTERN") && msEvalRegex(getenv("MS_MAP_PATTERN"), mapserv->request->ParamValues[i]) != MS_TRUE) {
-        msSetError(MS_WEBERR, "Parameter 'map' value fails to validate.", "msCGILoadMap()");
+      if(ms_map_env_pattern != NULL && msEvalRegex(ms_map_env_pattern, mapserv->request->ParamValues[i]) != MS_TRUE) {
+        msSetError(MS_WEBERR, "CGI variable \"map\" fails to validate.", "msCGILoadMap()");
         return NULL;
       }
-
-      /* ok to try to load now */
-      map = msLoadMap(mapserv->request->ParamValues[i], NULL);
+      ms_mapfile = getenv(mapserv->request->ParamValues[i]);
+    } else {
+      /* by now we know the request isn't for something in an environment variable */
+      if(ms_map_no_path != NULL) {
+        msSetError(MS_WEBERR, "CGI variable \"map\" not found in environment and this server is not configured for full paths.", "msCGILoadMap()");
+        return NULL;
+      }
+      ms_mapfile = mapserv->request->ParamValues[i];
     }
   }
-  
 
+  /* validate ms_mapfile if tainted */
+  if(ms_mapfile_tainted == MS_TRUE) {
+    if(msIsValidRegex(ms_map_bad_pattern) == MS_FALSE || msEvalRegex(ms_map_bad_pattern, ms_mapfile) == MS_TRUE) {
+      msSetError(MS_WEBERR, "CGI variable \"map\" fails to validate.", "msCGILoadMap()");
+      return NULL;
+    }
+    if(ms_map_pattern != NULL && msEvalRegex(ms_map_pattern, ms_mapfile) != MS_TRUE) {
+      msSetError(MS_WEBERR, "CGI variable \"map\" fails to validate.", "msCGILoadMap()");
+      return NULL;
+    }
+  }
+
+  /* ok to try to load now */
+  map = msLoadMap(ms_mapfile, NULL);
   if(!map) return NULL;
 
   if(!msLookupHashTable(&(map->web.validation), "immutable")) {
@@ -1059,7 +1090,7 @@ int setExtentFromShapes(mapservObj *mapserv)
   double dx, dy, cellsize;
 
   rectObj tmpext= {-1.0,-1.0,-1.0,-1.0};
-  pointObj tmppnt= {-1.0,-1.0};
+  pointObj tmppnt= {-1.0,-1.0,-1.0,-1.0};
 
   msGetQueryResultBounds(mapserv->map, &(tmpext));
 
@@ -1262,13 +1293,6 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
           }
 
           mapserv->map->query.type = MS_QUERY_BY_POINT;
-          mapserv->map->query.mode = MS_QUERY_SINGLE;
-
-          mapserv->map->query.point = mapserv->mappnt;
-          mapserv->map->query.buffer = mapserv->Buffer;
-
-          mapserv->map->query.layer = mapserv->QueryLayerIndex;
-          mapserv->map->query.slayer = mapserv->SelectLayerIndex; /* this will trigger the feature query eventually */
         } else { /* FEATURENQUERY */
           switch(mapserv->QueryCoordSource) {
             case FROMIMGPNT:
@@ -1344,14 +1368,14 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
               if(MS_SUCCESS != setExtent(mapserv)) /* set user area of interest */
                 return MS_FAILURE;
               mapserv->map->cellsize = msAdjustExtent(&(mapserv->map->extent), mapserv->map->width, mapserv->map->height);
-              if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+              if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
               mapserv->map->query.rect = mapserv->map->extent;
               mapserv->map->query.type = MS_QUERY_BY_RECT;
             } else {
               mapserv->map->extent = mapserv->ImgExt; /* use the existing image parameters */
               mapserv->map->width = mapserv->ImgCols;
               mapserv->map->height = mapserv->ImgRows;
-              if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+              if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
               mapserv->map->query.point = mapserv->mappnt;
               mapserv->map->query.type = MS_QUERY_BY_POINT;
             }
@@ -1360,7 +1384,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
           case FROMIMGBOX:
             if(mapserv->SearchMap) { /* compute new extent, pan etc then search that extent */
               setExtent(mapserv);
-              if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+              if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
               mapserv->map->cellsize = msAdjustExtent(&(mapserv->map->extent), mapserv->map->width, mapserv->map->height);
               mapserv->map->query.rect = mapserv->map->extent;
               mapserv->map->query.type = MS_QUERY_BY_RECT;
@@ -1370,7 +1394,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
               mapserv->map->extent = mapserv->ImgExt; /* use the existing image parameters */
               mapserv->map->width = mapserv->ImgCols;
               mapserv->map->height = mapserv->ImgRows;
-              if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+              if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
               cellx = MS_CELLSIZE(mapserv->ImgExt.minx, mapserv->ImgExt.maxx, mapserv->ImgCols); /* calculate the new search extent */
               celly = MS_CELLSIZE(mapserv->ImgExt.miny, mapserv->ImgExt.maxy, mapserv->ImgRows);
               mapserv->RawExt.minx = MS_IMAGE2MAP_X(mapserv->ImgBox.minx, mapserv->ImgExt.minx, cellx);
@@ -1387,7 +1411,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
             mapserv->map->width = mapserv->ImgCols;
             mapserv->map->height = mapserv->ImgRows;
             mapserv->map->cellsize = msAdjustExtent(&(mapserv->map->extent), mapserv->map->width, mapserv->map->height);
-            if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+            if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
 
             /* convert from image to map coordinates here (see setCoordinate) */
             for(i=0; i<mapserv->map->query.shape->numlines; i++) {
@@ -1407,7 +1431,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
             } else {
               setExtent(mapserv);
               if(mapserv->SearchMap) { /* the extent should be tied to a map, so we need to "adjust" it */
-                if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+                if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
                 mapserv->map->cellsize = msAdjustExtent(&(mapserv->map->extent), mapserv->map->width, mapserv->map->height);
               }
               mapserv->map->query.rect = mapserv->map->extent;
@@ -1421,7 +1445,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
           default: /* from an extent of some sort */
             setExtent(mapserv);
             if(mapserv->SearchMap) { /* the extent should be tied to a map, so we need to "adjust" it */
-              if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+              if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
               mapserv->map->cellsize = msAdjustExtent(&(mapserv->map->extent), mapserv->map->width, mapserv->map->height);
             }
 
@@ -1437,7 +1461,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
             mapserv->map->extent = mapserv->ImgExt; /* use the existing image parameters */
             mapserv->map->width = mapserv->ImgCols;
             mapserv->map->height = mapserv->ImgRows;
-            if((status = msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom)) != MS_SUCCESS) return MS_FAILURE;
+            if(msCalculateScale(mapserv->map->extent, mapserv->map->units, mapserv->map->width, mapserv->map->height, mapserv->map->resolution, &mapserv->map->scaledenom) != MS_SUCCESS) return MS_FAILURE;
             break;
           case FROMUSERPNT: /* only a buffer makes sense, DOES IT? */
             if(setExtent(mapserv) != MS_SUCCESS) return MS_FAILURE;
@@ -1464,7 +1488,7 @@ int msCGIDispatchQueryRequest(mapservObj *mapserv)
     } /* end mode switch */
 
     /* finally execute the query */
-    if((status = msExecuteQuery(mapserv->map)) != MS_SUCCESS) return MS_FAILURE;
+    if(msExecuteQuery(mapserv->map) != MS_SUCCESS) return MS_FAILURE;
   }
 
   if(mapserv->map->querymap.width != -1) mapserv->map->width = mapserv->map->querymap.width; /* make sure we use the right size */
@@ -1507,7 +1531,7 @@ int msCGIDispatchImageRequest(mapservObj *mapserv)
       msTileSetExtent(mapserv);
 
       if(!strcmp(MS_IMAGE_MIME_TYPE(mapserv->map->outputformat), "application/x-protobuf")) {
-        if((status = msMVTWriteTile(mapserv->map, mapserv->sendheaders)) != MS_SUCCESS) return MS_FAILURE;
+        if(msMVTWriteTile(mapserv->map, mapserv->sendheaders) != MS_SUCCESS) return MS_FAILURE;
         return MS_SUCCESS;
       }
 

@@ -110,11 +110,7 @@ static msPostGISLayerInfo *msPostGISCreateLayerInfo(void)
 {
   msPostGISLayerInfo *layerinfo = new msPostGISLayerInfo;
   layerinfo->paging = MS_TRUE;
-#ifdef USE_POINT_Z_M
   layerinfo->force2d = MS_FALSE;
-#else
-  layerinfo->force2d = MS_TRUE;
-#endif
   return layerinfo;
 }
 
@@ -277,30 +273,22 @@ wkbReadPointP(wkbObj *w, pointObj *p, int nZMFlag)
   w->ptr += sizeof(double);
   if( nZMFlag & HAS_Z )
   {
-#ifdef USE_POINT_Z_M
       memcpy(&(p->z), w->ptr, sizeof(double));
-#endif
       w->ptr += sizeof(double);
   }
-#ifdef USE_POINT_Z_M
   else
   {
       p->z = 0;
   }
-#endif
   if( nZMFlag & HAS_M )
   {
-#ifdef USE_POINT_Z_M
       memcpy(&(p->m), w->ptr, sizeof(double));
-#endif
       w->ptr += sizeof(double);
   }
-#ifdef USE_POINT_Z_M
   else
   {
       p->m = 0;
   }
-#endif
 }
 
 /*
@@ -698,7 +686,7 @@ arcSegmentSide(const pointObj &p1, const pointObj &p2, const pointObj &q)
 static int
 arcCircleCenter(const pointObj& p1, const pointObj& p2, const pointObj& p3, pointObj *center, double *radius)
 {
-  pointObj c;
+  pointObj c = {0,0,0,0}; // initialize
   double r;
 
   /* Circle is closed, so p2 must be opposite p1 & p3. */
@@ -2432,8 +2420,10 @@ static PGresult* runPQexecParamsWithBindSubstitution(layerObj *layer, const char
 **
 ** Registered vtable->LayerWhichShapes function.
 */
+// cppcheck-suppress passedByValue
 static int msPostGISLayerWhichShapes(layerObj *layer, rectObj rect, int isQuery)
 {
+  (void)isQuery;
 #ifdef USE_POSTGIS
   assert(layer != nullptr);
   assert(layer->layerinfo != nullptr);
@@ -2554,6 +2544,7 @@ static int msPostGISLayerNextShape(layerObj *layer, shapeObj *shape)
 ** msPostGISLayerGetShape()
 **
  */
+// cppcheck-suppress passedByValue
 static int msPostGISLayerGetShapeCount(layerObj *layer, rectObj rect, projectionObj *rectProjection)
 {
 #ifdef USE_POSTGIS
@@ -3564,10 +3555,9 @@ static int msPostGISLayerTranslateFilter(layerObj *layer, expressionObj *filter,
               node->tokenval.dblval == (int)node->tokenval.dblval )
               native_string += std::to_string((int)node->tokenval.dblval);
           else {
-              char* snippet = (char *) msSmallMalloc(32);
-              sprintf(snippet, "%.18g", node->tokenval.dblval);
-              native_string += snippet;
-              msFree(snippet);
+              char buffer[32];
+              snprintf(buffer, sizeof(buffer), "%.18g", node->tokenval.dblval);
+              native_string += buffer;
           }
           break;
         }
@@ -3670,10 +3660,9 @@ static int msPostGISLayerTranslateFilter(layerObj *layer, expressionObj *filter,
           break;
         case MS_TOKEN_BINDING_MAP_CELLSIZE:
         {
-          char* snippet = (char *) msSmallMalloc( 64);
-          snprintf(snippet, 64,  "%lf", layer->map->cellsize);
-          native_string += snippet;
-          msFree(snippet);
+          char buffer[32];
+          snprintf(buffer, sizeof(buffer), "%.18g", layer->map->cellsize);
+          native_string += buffer;
 	  break;
         }
 
@@ -3687,19 +3676,29 @@ static int msPostGISLayerTranslateFilter(layerObj *layer, expressionObj *filter,
         case MS_TOKEN_COMPARISON_CONTAINS:
         case MS_TOKEN_COMPARISON_EQUALS:
         case MS_TOKEN_COMPARISON_DWITHIN:
+        {
           if(node->next->token != '(') goto cleanup;
           native_string += "st_";
-          native_string += msExpressionTokenToString(node->token);
+          const char* str = msExpressionTokenToString(node->token);
+          if( str == nullptr )
+              goto cleanup;
+          native_string += str;
           break;
+        }
 
 	/* functions */
         case MS_TOKEN_FUNCTION_LENGTH:
         case MS_TOKEN_FUNCTION_AREA:
         case MS_TOKEN_FUNCTION_BUFFER:
         case MS_TOKEN_FUNCTION_DIFFERENCE:
+        {
           native_string += "st_";
-          native_string += msExpressionTokenToString(node->token);
+          const char* str = msExpressionTokenToString(node->token);
+          if( str == nullptr )
+              goto cleanup;
+          native_string += str;
           break;
+        }
 
 	case MS_TOKEN_COMPARISON_IEQ:
             if( ieq_expected )
@@ -3724,6 +3723,7 @@ static int msPostGISLayerTranslateFilter(layerObj *layer, expressionObj *filter,
           break;
 
         default:
+        {
           /* by default accept the general token to string conversion */
 
           if(node->token == MS_TOKEN_COMPARISON_EQ && node->next != nullptr && node->next->token == MS_TOKEN_LITERAL_TIME) break; /* skip, handled with the next token */
@@ -3736,8 +3736,12 @@ static int msPostGISLayerTranslateFilter(layerObj *layer, expressionObj *filter,
               break;
           }
 
-          native_string += msExpressionTokenToString(node->token);
+          const char* str = msExpressionTokenToString(node->token);
+          if( str == nullptr )
+              goto cleanup;
+          native_string += str;
           break;
+        }
         }
 
       node = node->next;

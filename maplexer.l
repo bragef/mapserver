@@ -59,13 +59,16 @@ int  msyystring_size_tmp;
 int msyyreturncomments = 0;
 
 #define MS_LEXER_STRING_REALLOC(string, string_size, max_size, string_ptr)   \
-   if (string_size >= max_size) {         \
-       msyystring_size_tmp = max_size;     \
-       max_size = ((max_size*2) > string_size) ? max_size*2 : string_size+1;                     \
-       string = (char *) msSmallRealloc(string, sizeof(char *) * max_size);  \
+  do { \
+   const int string_size_macro = (int)(string_size); \
+   if (string_size_macro >= (int)(max_size)) {         \
+       msyystring_size_tmp = (max_size);     \
+       max_size = (((int)(max_size)*2) > string_size_macro) ? ((int)(max_size))*2 : string_size_macro+1;   \
+       string = (char *) msSmallRealloc(string, sizeof(char *) * (max_size));  \
        string_ptr = string;    \
        string_ptr += msyystring_size_tmp; \
-   }
+   } \
+  } while(0)
 
 #define MS_LEXER_RETURN_TOKEN(token) \
    MS_LEXER_STRING_REALLOC(msyystring_buffer, strlen(msyytext),  \
@@ -255,7 +258,6 @@ char path[MS_MAXPATHLEN];
 <INITIAL>datapattern                           { MS_LEXER_RETURN_TOKEN(DATAPATTERN); }
 <INITIAL>debug                                 { MS_LEXER_RETURN_TOKEN(DEBUG); }
 <INITIAL>driver                                { MS_LEXER_RETURN_TOKEN(DRIVER); }
-<INITIAL>dump                                  { MS_LEXER_RETURN_TOKEN(DUMP); }
 <INITIAL>empty                                 { MS_LEXER_RETURN_TOKEN(EMPTY); }
 <INITIAL>encoding                              { MS_LEXER_RETURN_TOKEN(ENCODING); }
 <INITIAL,URL_STRING>end                        { MS_LEXER_RETURN_TOKEN(END); }
@@ -447,6 +449,7 @@ char path[MS_MAXPATHLEN];
 <INITIAL>giant                                 { MS_LEXER_RETURN_TOKEN(MS_GIANT); }
 <INITIAL>hatch                                 { MS_LEXER_RETURN_TOKEN(MS_SYMBOL_HATCH); }
 <INITIAL>kerneldensity                         { MS_LEXER_RETURN_TOKEN(MS_KERNELDENSITY); }
+<INITIAL>idw                                   { MS_LEXER_RETURN_TOKEN(MS_IDW); }
 <INITIAL>hilite                                { MS_LEXER_RETURN_TOKEN(MS_HILITE); }
 <INITIAL,URL_STRING>inches                     { MS_LEXER_RETURN_TOKEN(MS_INCHES); }
 <INITIAL,URL_STRING>kilometers                 { MS_LEXER_RETURN_TOKEN(MS_KILOMETERS); }
